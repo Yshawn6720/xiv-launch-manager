@@ -1,0 +1,48 @@
+{{!--
+  cargo-about 模板：THIRD-PARTY-NOTICES.txt 的 Rust 部分（純文字）。由 scripts/notices.mjs 呼叫，
+  檔頭與前端套件部分由該腳本補上。一律用 {{{ }}}：預設的 {{ }} 會把引號等字元轉成 HTML 實體。
+  不輸出 source_path：那是本機的絕對路徑，換一台機器內容就不同。
+--}}
+================================================================================
+Part 1. Rust crates compiled into the program
+第一部分：編譯進主程式的 Rust crate
+================================================================================
+
+Source code of each crate is available at https://crates.io/crates/<name>/<version>
+各 crate 的原始碼可從 https://crates.io/crates/<名稱>/<版本> 取得。
+
+Summary: license -> packages using it
+摘要：授權 → 使用它的套件
+A package listed more than once under the same license ships more than one
+notice for it (e.g. different copyright holders); each is reproduced below.
+同一套件在同一授權下出現多次，表示它附有多份內容不同的聲明（例如版權人不同），
+下方全文各列一份。
+--------------------------------------------------------------------------------
+{{#each overview}}
+
+{{{name}}} ({{{id}}})
+{{#each indices}}
+{{#with (lookup @root.licenses this)}}
+{{#each used_by}}
+    {{{crate.name}}} {{{crate.version}}}
+{{/each}}
+{{/with}}
+{{/each}}
+{{/each}}
+
+================================================================================
+Rust crates: full license texts
+Rust crate 授權全文
+================================================================================
+{{#each licenses}}
+
+--------------------------------------------------------------------------------
+{{{name}}} ({{{id}}})
+Used by / 使用的套件：
+{{#each used_by}}
+    {{{crate.name}}} {{{crate.version}}}
+{{/each}}
+--------------------------------------------------------------------------------
+
+{{{text}}}
+{{/each}}

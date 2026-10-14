@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>繁中服登入確認</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --fg: light-dark(#161a23, #edeff4);
+    --muted: light-dark(#525a68, #a2aab8);
+    --bg: light-dark(#f4f6f9, #1a1d25);
+    --field: light-dark(#ffffff, #13151b);
+    --border: light-dark(rgb(16 24 40 / 0.2), rgb(255 255 255 / 0.18));
+    --accent: #5865f2;
+    --accent-hover: #4752c4;
+    --error: light-dark(#b42318, #ff8f80);
+    --disabled-fg: light-dark(#757c89, #7c8494);
+    --disabled-bg: light-dark(#e3e6eb, #252932);
+  }
+  html, body { margin: 0; height: 100%; }
+  body {
+    box-sizing: border-box;
+    /* 下方留給 reCAPTCHA 徽章（固定在右下角），不壓到按鈕。 */
+    padding: 22px 26px 84px;
+    font-family: "Microsoft JhengHei UI", "Segoe UI", sans-serif;
+    font-size: 15px;
+    line-height: 1.6;
+    color: var(--fg);
+    background: var(--bg);
+  }
+  form { margin: 0; display: flex; flex-direction: column; gap: 12px; }
+  h1 { margin: 0; font-size: 19px; font-weight: 600; }
+  .account { margin: 0; display: flex; gap: 10px; align-items: baseline; }
+  .account span { color: var(--muted); flex: none; }
+  .account strong { font-weight: 600; overflow-wrap: anywhere; }
+  .hint { margin: 0; color: var(--muted); font-size: 14px; }
+  .otp { display: flex; gap: 10px; align-items: center; }
+  .otp[hidden] { display: none; }
+  .otp input {
+    width: 8em;
+    height: 34px;
+    box-sizing: border-box;
+    padding: 0 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--field);
+    color: var(--fg);
+    font: inherit;
+    letter-spacing: 0.15em;
+  }
+  #status { margin: 0; min-height: 1.6em; font-size: 14px; color: var(--muted); }
+  #status.error { color: var(--error); }
+  .buttons { display: flex; justify-content: flex-end; gap: 10px; }
+  button {
+    min-width: 88px;
+    height: 36px;
+    padding: 0 18px;
+    border-radius: 8px;
+    font: inherit;
+    cursor: pointer;
+  }
+  #cancel { border: 1px solid var(--border); background: transparent; color: var(--fg); }
+  #login { border: 1px solid transparent; background: var(--accent); color: #fff; font-weight: 600; }
+  #login:hover:not(:disabled) { background: var(--accent-hover); }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  #cancel:disabled, #login:disabled {
+    cursor: default;
+    color: var(--disabled-fg);
+    background: var(--disabled-bg);
+    border-color: transparent;
+  }
+</style>
+</head>
+<!-- data-otp、帳號名稱由 recaptcha.rs 依帳號填入（帳號名稱已做 HTML escape）。 -->
+<body data-otp="{{otp}}">
+<form id="form" autocomplete="off">
+  <h1>登入繁中服</h1>
+  <p class="account"><span>帳號</span><strong>{{account}}</strong></p>
+  <p class="hint">按「登入」後才進行 Google reCAPTCHA 驗證並送出登入；密碼由啟動器送出，不經過這個頁面。</p>
+  <label class="otp" id="otp-field" hidden>OTP 碼<input id="otp" inputmode="numeric" maxlength="6" autocomplete="one-time-code" spellcheck="false"></label>
+  <p id="status" role="status">reCAPTCHA 載入中…</p>
+  <div class="buttons">
+    <button type="button" id="cancel">取消</button>
+    <button type="submit" id="login" disabled>登入</button>
+  </div>
+</form>
+<script>
+// 本頁由啟動器攔截 https://launcher.ffxiv.com.tw/index.html 後回傳（reCAPTCHA Enterprise 只接受此 origin）。
+// 使用者按「登入」時才 execute（不在載入時自動執行），token 與手動輸入的 OTP 經 tw_recaptcha_event 交回啟動器；
+// token、OTP 不寫進畫面或 console。之後由啟動器送登入，本頁顯示「登入中…」到啟動器關窗為止。
+(function () {
+  'use strict';
+
+  var SITE_KEY = '6Ld6VmorAAAAANQdQeqkaOeScR42qHC7Hyalq00r';
+  var manualOtp = document.body.getAttribute('data-otp') === 'manual';
+  var form = document.getElementById('form');
+  var loginButton = document.getElementById('login');
+  var cancelButton = document.getElementById('cancel');
+  var otpField = document.getElementById('otp-field');
+  var otpInput = document.getElementById('otp');
+  var statusEl = document.getElementById('status');
+  var ready = false;
+  /** 已按「登入」、取消或失敗：之後不再接受按「登入」。 */
+  var done = false;
+
+  function setStatus(message, error) {
+    statusEl.textContent = message;
+    statusEl.className = error ? 'error' : '';
+  }
+
+  function noBridge() {
+    setStatus('無法連回啟動器，請關閉此視窗後重試。', true);
+  }
+
+  function report(event) {
+    var internals = window.__TAURI_INTERNALS__;
+    if (!internals || typeof internals.invoke !== 'function') {
+      noBridge();
+      return;
+    }
+    internals.invoke('tw_recaptcha_event', { event: event }).catch(noBridge);
+  }
+
+  function otpValue() {
+    return otpInput.value.trim();
+  }
+
+  function canSubmit() {
+    return ready && !done && (!manualOtp || /^\d{6}$/.test(otpValue()));
+  }
+
+  function refresh() {
+    loginButton.disabled = !canSubmit();
+  }
+
+  // 啟動器收到失敗會關閉視窗並在主視窗顯示原因。
+  function fail(reason, message) {
+    done = true;
+    refresh();
+    otpInput.disabled = true;
+    setStatus(message, true);
+    report({ kind: 'failed', reason: reason });
+  }
+
+  form.addEventListener('submit', function (e) {
+    e.preventDefault();
+    if (!canSubmit()) {
+      return;
+    }
+    done = true;
+    refresh();
+    otpInput.disabled = true;
+    setStatus('驗證中…');
+    report({ kind: 'submit' });
+    var pending;
+    try {
+      pending = window.grecaptcha.enterprise.execute(SITE_KEY, { action: 'LOGIN' });
+    } catch (err) {
+      fail('execute', 'reCAPTCHA 驗證失敗。');
+      return;
+    }
+    Promise.resolve(pending).then(
+      function (token) {
+        if (typeof token !== 'string' || token === '') {
+          fail('emptyToken', 'reCAPTCHA 沒有回傳驗證結果。');
+          return;
+        }
+        // 已交給啟動器登入：取消不再有意義，視窗由啟動器在登入結束後關閉。
+        cancelButton.disabled = true;
+        setStatus('登入中…');
+        report({ kind: 'token', token: token, otp: manualOtp ? otpValue() : null });
+      },
+      function () {
+        fail('execute', 'reCAPTCHA 驗證失敗。');
+      }
+    );
+  });
+
+  cancelButton.addEventListener('click', function () {
+    done = true;
+    refresh();
+    cancelButton.disabled = true;
+    otpInput.disabled = true;
+    setStatus('已取消。');
+    report({ kind: 'cancel' });
+  });
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && !cancelButton.disabled) {
+      cancelButton.click();
+    }
+  });
+
+  if (manualOtp) {
+    otpField.hidden = false;
+    otpInput.addEventListener('input', refresh);
+    otpInput.focus();
+  }
+
+  var script = document.createElement('script');
+  script.src = 'https://www.google.com/recaptcha/enterprise.js?render=' + SITE_KEY;
+  script.async = true;
+  script.onload = function () {
+    var enterprise = window.grecaptcha && window.grecaptcha.enterprise;
+    if (!enterprise) {
+      fail('load', 'reCAPTCHA 載入不完整。');
+      return;
+    }
+    enterprise.ready(function () {
+      if (done) {
+        return;
+      }
+      ready = true;
+      refresh();
+      setStatus(manualOtp ? '輸入 OTP 碼後按「登入」。' : '確認帳號後按「登入」。');
+      report({ kind: 'ready' });
+      if (!manualOtp) {
+        loginButton.focus();
+      }
+    });
+  };
+  script.onerror = function () {
+    fail('load', '無法載入 reCAPTCHA，請檢查網路。');
+  };
+  document.head.appendChild(script);
+})();
+</script>
+</body>
+</html>

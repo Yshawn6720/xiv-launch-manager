@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "tw-recaptcha",
+  "description": "台服登入確認視窗：只綁 tw-recaptcha、只對 launcher.ffxiv.com.tw 的遠端頁面生效、只開放收頁面事件（就緒、按下、token、取消、失敗）的 command。fetch IPC 只帶 Origin，故 URL 寫到 origin；頁面 path 由 recaptcha.rs 的 on_navigation 釘死在 /index.html。",
+  "windows": ["tw-recaptcha"],
+  "local": false,
+  "remote": {
+    "urls": ["https://launcher.ffxiv.com.tw"]
+  },
+  "permissions": ["allow-tw-recaptcha-event"]
+}

@@ -1,0 +1,196 @@
+# cargo-about 設定：產生 THIRD-PARTY-NOTICES.txt 的 Rust 部分（由 scripts/notices.mjs 呼叫，流程見 docs/release.md
+# 「授權與第三方聲明」）。只列發佈的 exe 實際連結的 crate。
+
+# 只發 Windows x64 的 NSIS 安裝檔；其他平台才有的依賴（cfg 篩掉）不列。
+targets = ["x86_64-pc-windows-msvc"]
+# 不列 build-dependencies：tauri-build 等只在編譯時執行，程式碼不進 exe（build.rs 嵌進 exe 的圖示與 manifest 是本專案自己的檔案）。
+# 不列 dev-dependencies：只給測試用（例如 tempfile），不隨安裝檔發佈。
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+# 本專案自己（publish = false）不是第三方元件。
+private = { ignore = true }
+
+# 允許的授權，依優先序：crate 有多種授權可選（例如 "MIT OR Apache-2.0"）時取最前面的一種，與本專案同為 Apache-2.0。
+# 任何 crate 的授權無法只用這些滿足時，cargo-about 直接失敗（fail-closed）；新增前先確認義務，見 docs/release.md。
+# MPL-2.0：檔案層級的 copyleft，未修改原始碼時，附上授權全文並告知原始碼取得處即可（聲明檔開頭寫了 crates.io 的位置）。
+# MIT-0：ppmd-rust 的 "CC0-1.0 OR MIT-0" 只需其一，取 MIT-0。
+accepted = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "bzip2-1.0.6",
+    "MIT-0",
+]
+
+# ---------------------------------------------------------------------------------------------------------
+# clarify：cargo-about 自動掃描抓不到正確授權全文的 crate。不 clarify 時，cargo-about 會改用 SPDX 範本全文，
+# 範本裡的版權行是 "<year> <owner>" 佔位字，MIT／BSD／ISC 要求保留的版權聲明就不見了。
+# 每一筆以 checksum 鎖住來源檔（或 start／end 擷取的段落）；crate 升版後內容不同，checksum 對不上，
+# clarify 不會套用，cargo-about 只印 WARN——scripts/notices.mjs 把任何 WARN 都當失敗，要人重新檢查後更新 checksum。
+# 未列入的 rustls-webpki、untrusted、rustls：manifest 的授權式正確、套件內的授權檔掃描得到，不需要 clarify。
+# 不開 cargo-about 內建的 workarounds：ring workaround 的 checksum 對應 ring 舊版把四種授權合在一個 LICENSE 的寫法，
+# 0.17.14 已拆檔，套用只會因 checksum 不符而失效（ring 改用下方的 clarify）；rustls 0.23 已把授權拆成個別檔案，掃描得到。
+# ---------------------------------------------------------------------------------------------------------
+
+# aws-lc-rs：LICENSE 開頭是 SPDX 標頭，後面接 Apache-2.0 與 ISC 兩段全文，合在一個檔案裡掃描器認不出來，
+# 原本落到範本全文（ISC 段的 "Copyright Amazon.com, Inc." 會遺失）。依 cargo-about 文件用 start／end 擷取 ISC 段。
+# 授權式沿用 manifest；ISC 本來就必選，"(Apache-2.0 OR ISC)" 也由 ISC 滿足，所以只需要 ISC 段。
+[aws-lc-rs.clarify]
+license = "ISC AND (Apache-2.0 OR ISC)"
+
+[[aws-lc-rs.clarify.files]]
+path = "LICENSE"
+license = "ISC"
+start = "ISC license"
+end = "OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE."
+checksum = "e8a32ff587b5f483695b06272ad3b1e2274cf020f7fa9c2fe3dbf5aa3be039fd"
+
+# aws-lc-sys：LICENSE 前半是編進 libcrypto 的各元件（AWS-LC、BoringSSL、OpenSSL、mlkem／mldsa-native、fiat、
+# s2n-bignum、Jitter Entropy）的版權與 SPDX 標示，後半是各授權全文。掃描器只認出 third_party/fiat/LICENSE，
+# 其餘全落到範本全文。授權式沿用 manifest；各段依內容歸到對應的授權：
+# - 前半的版權與來源說明歸 ISC（Amazon 與 Google 的 ISC 版權行都在這段）；
+# - Jitter Entropy 那段（Stephan Mueller 的版權、Amazon 選 BSD-3-Clause 而非 GPL-2.0 的聲明）歸 BSD-3-Clause；
+# - MIT 用 fiat 自己的 LICENSE（含 fiat-crypto authors 的版權行）。
+[aws-lc-sys.clarify]
+license = "ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0)"
+
+[[aws-lc-sys.clarify.files]]
+path = "LICENSE"
+license = "ISC"
+start = "AWS Libcrypto (AWS-LC)"
+end = "Code from sources and by authors listed in comments on top of the respective files."
+checksum = "011f012c46e9bb03bf4f20788464fbb737dce89499fae86a53709359c796fbe8"
+
+[[aws-lc-sys.clarify.files]]
+path = "LICENSE"
+license = "ISC"
+start = "ISC License\n-----------"
+end = "PERFORMANCE OF THIS SOFTWARE."
+checksum = "44dec10b6577f5726bd40eebd9aec6ce18e09c58df7d233dc493f32a98f73f3a"
+
+[[aws-lc-sys.clarify.files]]
+path = "LICENSE"
+license = "Apache-2.0"
+start = "Apache License 2.0\n------------------"
+end = "limitations under the License."
+checksum = "13d5507b6f3b14c5efb81607e6ab274c14fc84bc856d213d63af16dec06336f0"
+
+[[aws-lc-sys.clarify.files]]
+path = "LICENSE"
+license = "BSD-3-Clause"
+start = "Jitter Entropy RNG\n"
+end = "SPDX-License-Identifier: BSD-3-Clause\n```"
+checksum = "876b8eda1bf9267897fd2988b172d921ed13a3e5614c906fab5ef255836e4e70"
+
+[[aws-lc-sys.clarify.files]]
+path = "LICENSE"
+license = "BSD-3-Clause"
+start = "BSD 3-Clause License\n--------------------"
+end = "EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE."
+checksum = "636ab24d0ebae802ea87599d6ea0aa9466fff495c5be10be483860abba2f98c7"
+
+[[aws-lc-sys.clarify.files]]
+path = "aws-lc/third_party/fiat/LICENSE"
+license = "MIT"
+checksum = "43e358d7b6eb109d0f51f7b3a090fd82607965767c25fadee39e922475de2061"
+
+# alloc-stdlib：發佈的套件沒附授權檔，原本落到範本全文。依 cargo-about 文件改從原始 repo 取 .cargo_vcs_info.json
+# 記錄的那個 commit 的 LICENSE（dropbox/rust-alloc-no-stdlib 根目錄，Dropbox 的 BSD-3-Clause；與同 repo 的
+# alloc-no-stdlib 套件內附的 LICENSE 逐字相同）。
+[alloc-stdlib.clarify]
+license = "BSD-3-Clause"
+
+[[alloc-stdlib.clarify.git]]
+path = "LICENSE"
+checksum = "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae"
+
+# brotli-decompressor：manifest 寫 "BSD-3-Clause/MIT"（二擇一），但套件只附 BSD-3-Clause 的 LICENSE（Dropbox 版權）。
+# 依優先序會選 MIT，而套件裡沒有 MIT 全文，只能用範本；改為明確選用有附全文與版權行的 BSD-3-Clause。
+[brotli-decompressor.clarify]
+license = "BSD-3-Clause"
+
+[[brotli-decompressor.clarify.files]]
+path = "LICENSE"
+checksum = "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae"
+
+# dpi：授權式 "Apache-2.0 AND MIT"，MIT 部分是移植自 rust-lang/libm 的程式碼。LICENSE-LIBM-MIT 開頭有說明文字、
+# 結尾附 libm／musl 的版權清單，掃描器信心不足而沒認出，原本落到範本全文。
+[dpi.clarify]
+license = "Apache-2.0 AND MIT"
+
+[[dpi.clarify.files]]
+path = "LICENSE"
+license = "Apache-2.0"
+checksum = "6dc0e068dcf3a5bc8e054205b85b7720e1d49265bbc64bf515d2cf79197df69a"
+
+[[dpi.clarify.files]]
+path = "LICENSE-LIBM-MIT"
+license = "MIT"
+checksum = "9eff396a99bafd208e7126602420d6864f6066c08b84485a5b032320a9c01997"
+
+# minisign-verify：LICENSE 是 MIT（Frank Denis 版權），只是排版成窄欄，掃描器信心低於門檻沒認出，原本落到範本全文。
+[minisign-verify.clarify]
+license = "MIT"
+
+[[minisign-verify.clarify.files]]
+path = "LICENSE"
+checksum = "42c8695fbc468866d9756be99af0ba4e37d733f8daa3c8827c8d80b8bec1b2f9"
+
+# ring：manifest 的 "Apache-2.0 AND ISC" 正確，但沒 clarify 時掃描器把十幾個原始碼檔頭的 ISC 註解各當成一份授權，
+# 摘要裡 ring 重複十幾次，又只撈到其中一部分（各檔頭的版權人不只這些）。改依 ring 自己 LICENSE 的說明：
+# LICENSE（總說明：新程式碼用 ISC、取自 BoringSSL 的用 Apache-2.0、各檔授權寫在檔頭）與 LICENSE-other-bits
+# （ISC，Brian Smith 版權）歸 ISC，LICENSE-BoringSSL 歸 Apache-2.0。
+[ring.clarify]
+license = "Apache-2.0 AND ISC"
+
+[[ring.clarify.files]]
+path = "LICENSE"
+license = "ISC"
+checksum = "b3d734001a94efff3579978d953391aa7115f877657d25eb54037a43875d078a"
+
+[[ring.clarify.files]]
+path = "LICENSE-other-bits"
+license = "ISC"
+checksum = "f025ccfb7dfb6bdfedc75ca0f67acc69e6fb4998143d834f7c2f38a29989680f"
+
+[[ring.clarify.files]]
+path = "LICENSE-BoringSSL"
+license = "Apache-2.0"
+checksum = "005fc765ddc5115da796cca915baa9557abae13ff35e0a47c47affc56f6c414d"
+
+# sevenz-rust2：掃描器把測試資料 tests/resources/apache2.txt 也當成授權檔，聲明裡同一份 Apache-2.0 會列兩次；
+# 鎖定套件根目錄的 LICENSE。
+[sevenz-rust2.clarify]
+license = "Apache-2.0"
+
+[[sevenz-rust2.clarify.files]]
+path = "LICENSE"
+checksum = "43070e2d4e532684de521b885f385d0841030efa2b1a20bafb76133a5e1379c1"
+
+# webview2-com、webview2-com-sys、webview2-com-macros：發佈的套件都沒附授權檔，原本落到範本全文。
+# 依 cargo-about 文件改從原始 repo（wravery/webview2-rs）取 .cargo_vcs_info.json 記錄的 commit 的根目錄 LICENSE
+# （MIT，Bill Avery 版權；三個 crate 的兩個 commit 裡內容相同）。
+[webview2-com.clarify]
+license = "MIT"
+
+[[webview2-com.clarify.git]]
+path = "LICENSE"
+checksum = "0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73"
+
+[webview2-com-sys.clarify]
+license = "MIT"
+
+[[webview2-com-sys.clarify.git]]
+path = "LICENSE"
+checksum = "0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73"
+
+[webview2-com-macros.clarify]
+license = "MIT"
+
+[[webview2-com-macros.clarify.git]]
+path = "LICENSE"
+checksum = "0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73"

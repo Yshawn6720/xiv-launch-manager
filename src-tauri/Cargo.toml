@@ -1,0 +1,63 @@
+[package]
+name = "xiv-launch-manager"
+version = "0.3.0"
+description = "FFXIV 啟動管理器：多區服帳號與 Dalamud 版本管理"
+license = "Apache-2.0"
+authors = ["shawn_lin"]
+edition = "2024"
+publish = false
+
+[lib]
+# 與 bin 同名會在 Windows 撞名（cargo#8519），lib 加 _lib 後綴。
+name = "xiv_launch_manager_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# tray-icon：遊戲啟動後縮到系統匣（設定 › 介面）；Tauri 2 的系統匣 API 在這個 feature 後面。
+tauri = { version = "2", features = ["tray-icon"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2.0.21"
+tokio = { version = "1.53.2", features = ["sync", "time", "process", "macros", "rt-multi-thread", "fs"] }
+sha1 = "0.11.0"
+md-5 = "0.11.0"
+hmac = "0.13.0"
+hex = "0.4.3"
+base64 = "0.23.1"
+regex = "1.13.1"
+data-encoding = "2.11.1"
+uuid = { version = "1.28.0", features = ["v4"] }
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+zip = { version = "9.0.2", default-features = false, features = ["deflate"] }
+# ZiPatch（protocols §5.4）：SQPK/F 的 raw Deflate 與 chunk CRC32；版本同 Cargo.lock 既有的間接依賴。
+flate2 = "1.1.10"
+crc32fast = "1.5.2"
+sevenz-rust2 = "0.24.0"
+winreg = "0.56.0"
+# ACT 雙開共用 OverlayPlugin 的 CEF（protocols §6.5）：一般權限建立 directory junction。不開預設的 unstable_admin：
+# 開檔被拒時不去啟用 SeBackup／SeRestore 特權。依賴（windows-sys、scopeguard）都已在 Cargo.lock。
+junction = { version = "2.1.0", default-features = false }
+tauri-plugin-single-instance = "2.5.3"
+# 關掉預設的 zip feature：只發 v2 的 NSIS .exe 更新包，不需要 v1 的 .nsis.zip 解壓（也免得多拉一份 zip 4）。
+tauri-plugin-updater = { version = "2.13.3", default-features = false, features = ["rustls-tls", "system-proxy"] }
+# 程式更新自己下載後驗簽（plugin 的 install 不驗）；與 plugin 用同一版。
+minisign-verify = "0.3.0"
+# 提權 helper（主 note「信任邊界」）：Security_Cryptography＝job SHA-256（CNG）、Diagnostics_ToolHelp＝遊戲執行判定、
+# System_Registry＝ShellExecuteExW 的 SHELLEXECUTEINFOW 需要。Security＋System_SystemServices＝不帶衛月啟動時
+# 自訂遊戲程序 DACL。
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_System_SystemInformation", "Win32_System_SystemServices", "Win32_Security", "Win32_Security_Credentials", "Win32_Security_Cryptography", "Win32_System_Com", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Registry", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json", "gzip", "deflate", "http2", "charset", "form", "stream", "system-proxy"] }
+webview2-com = "0.39.1"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true
+
+[dev-dependencies]
+tempfile = "3.27.0"

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-list-yanmucorp-releases"
+description = "Enables the list_yanmucorp_releases command without any pre-configured scope."
+commands.allow = ["list_yanmucorp_releases"]
+
+[[permission]]
+identifier = "deny-list-yanmucorp-releases"
+description = "Denies the list_yanmucorp_releases command without any pre-configured scope."
+commands.deny = ["list_yanmucorp_releases"]

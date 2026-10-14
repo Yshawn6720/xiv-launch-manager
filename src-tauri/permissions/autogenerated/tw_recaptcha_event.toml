@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-tw-recaptcha-event"
+description = "Enables the tw_recaptcha_event command without any pre-configured scope."
+commands.allow = ["tw_recaptcha_event"]
+
+[[permission]]
+identifier = "deny-tw-recaptcha-event"
+description = "Denies the tw_recaptcha_event command without any pre-configured scope."
+commands.deny = ["tw_recaptcha_event"]

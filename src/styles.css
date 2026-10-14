@@ -1,0 +1,2741 @@
+/*
+ * 視覺方向：現代工具風（Discord／Linear 類），偏藍紫的冷色調。表面由底往上：--bg（標題列、訊息列）→ --sidebar（帳號側欄）→
+ * --surface（內容區；登入表單直接鋪在上面）→ --card（「擴充功能」「設定」的區塊卡片）；輸入框與凹槽（segmented、區服子分頁）
+ * 用比卡片、內容區都暗的 --field，浮起的選中項、次要按鈕與選單用 --raised。各層在同一色相內只差一點明度，層次主要靠清楚的
+ * --border（卡片外框、分隔線）與卡片陰影；卡片裡不再有「比卡片稍暗」的凹層：分段改用小標題與分隔線，巢狀卡片、設定列只畫外框。
+ * 色票依 WCAG 2.1 AA 調過：文字（含 muted、accent、badge、頭像縮寫、error／success）對實際底色（含 hover、選中與 tint 疊色）≥ 4.5:1；
+ * 控制項邊框（--border-strong：輸入框、下拉、勾選框）、focus ring、狀態圓點 ≥ 3:1；停用文字 ≥ 3:1。
+ * 改色或改 tint 百分比（側欄選中 20%／12%、badge 15%、頭像 20%、callout 10%、ghost danger／選單刪除 hover 12%…）都要重算。
+ *
+ * 深淺主題（設定 › 介面 › 主題）：深淺不同的色票只寫一份 `light-dark(淺色, 深色)`，由 `color-scheme` 選用。沒有 data-theme
+ * 時 `color-scheme: light dark`，跟系統（與 prefers-color-scheme 同一個偏好）；main.ts 在 <html> 設 data-theme="dark"／"light"
+ * 強制深淺。捲軸、原生下拉選單等也看 `color-scheme`，跟著一起切。
+ */
+:root {
+  color-scheme: light dark;
+  --fg: light-dark(#161a23, #edeff4);
+  --muted: light-dark(#525a68, #a2aab8);
+  /* --accent：文字、指示條與 focus ring；--accent-solid：主按鈕、勾選框的底色（上面是白字） */
+  --accent: light-dark(#4338ca, #a5acff);
+  --accent-solid: #5865f2;
+  --accent-solid-hover: #4752c4;
+  --on-accent: #ffffff;
+  /* 品牌方塊漸層的第二色（純裝飾） */
+  --brand-2: #8b5cf6;
+  --success: light-dark(#04603a, #4ade80);
+  --error: light-dark(#b42318, #ff8f80);
+  /* 表面，由底往上（同色相、小幅明度差）；輸入框比卡片暗一階 */
+  --bg: light-dark(#e5e8ee, #0f1115);
+  --sidebar: light-dark(#edeff4, #14161c);
+  --surface: light-dark(#f4f6f9, #1a1d25);
+  --card: light-dark(#ffffff, #22262f);
+  --field: light-dark(#f1f3f7, #13151b);
+  --raised: light-dark(#ffffff, #2e333e);
+  --border: light-dark(rgb(16 24 40 / 0.15), rgb(255 255 255 / 0.14));
+  --border-strong: light-dark(#7d8592, #6c7383);
+  --hover: light-dark(rgb(16 24 40 / 0.05), rgb(255 255 255 / 0.06));
+  --disabled-fg: light-dark(#757c89, #7c8494);
+  --disabled-bg: light-dark(#eceef2, #252932);
+  /* 側欄帳號列的 hover／選中底色：不透明，頭像色點的外圈才能跟著同色 */
+  --sidebar-hover: light-dark(
+    color-mix(in srgb, var(--fg) 5%, var(--sidebar)),
+    color-mix(in srgb, var(--fg) 6%, var(--sidebar))
+  );
+  --sidebar-selected: light-dark(
+    color-mix(in srgb, var(--accent-solid) 12%, var(--sidebar)),
+    color-mix(in srgb, var(--accent-solid) 20%, var(--sidebar))
+  );
+  /* 區服色：badge、chip、頭像、區服分頁共用 */
+  --region-global: var(--accent);
+  --region-tw: var(--success);
+  /* 尺度：圓角四階、控制項高度（一般／登入表單）、陰影三階、focus ring、動效 */
+  --radius-lg: 14px;
+  --radius: 10px;
+  --radius-sm: 8px;
+  --radius-xs: 6px;
+  --control-h: 36px;
+  --control-h-lg: 40px;
+  /*
+   * 深色底上陰影要更重才看得出層次；卡片的陰影多一層柔和外擴，和內容區分開。深淺兩版的位移不同：另一版用不到的那層
+   * 顏色是 transparent（不畫），兩版才能寫成同一份。
+   */
+  --shadow-1:
+    0 1px 2px light-dark(rgb(16 24 40 / 0.06), rgb(0 0 0 / 0.4)),
+    0 1px 3px light-dark(rgb(16 24 40 / 0.05), transparent),
+    0 2px 8px light-dark(transparent, rgb(0 0 0 / 0.2));
+  --shadow-2:
+    0 6px 16px light-dark(rgb(16 24 40 / 0.08), transparent),
+    0 1px 3px light-dark(rgb(16 24 40 / 0.06), transparent),
+    0 8px 24px light-dark(transparent, rgb(0 0 0 / 0.4)),
+    0 2px 6px light-dark(transparent, rgb(0 0 0 / 0.3));
+  --shadow-3: 0 24px 64px light-dark(rgb(16 24 40 / 0.24), rgb(0 0 0 / 0.6));
+  --focus-ring: 2px solid var(--accent);
+  --ease: 150ms cubic-bezier(0.2, 0, 0, 1);
+  /*
+   * 間距（4px 為基準）：--space-1／2 元件內（圖示與文字、按鈕之間），--space-3 欄位與列之間，--space-4 欄位群組與卡片內距，
+   * --space-5 區塊之間與頁面外框，--space-6 大段落。1–3px 的微調（badge、segmented 內距、分隔線）不在尺度內。
+   */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  /* 字級：xs 說明小字與 badge、sm 次要文字與按鈕、md 內文、lg 標題與主按鈕、xl OTP 大字、2xl 頁面標題 */
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-md: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+  --text-2xl: 22px;
+  /* 「擴充功能」「設定」的內容寬度：分頁列、區塊卡片同一個右緣 */
+  --content-w: 800px;
+  font-family: "Segoe UI", "Microsoft JhengHei UI", sans-serif;
+  font-size: var(--text-md);
+  line-height: 1.5;
+  color: var(--fg);
+  background: var(--bg);
+  accent-color: var(--accent-solid);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+/* 元件規則常設 display，會蓋掉 UA 的 [hidden]；main.ts 以 hidden 屬性切換顯示。 */
+[hidden] {
+  display: none !important;
+}
+
+.global {
+  --region: var(--region-global);
+}
+
+.tw {
+  --region: var(--region-tw);
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.error,
+.warn {
+  color: var(--error);
+}
+
+/* 只給輔助技術讀的文字（例如側欄「密碼未儲存」圖示的說明）。 */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* ---------- 版面：header／footer 固定，只有 main 捲動，訊息列永遠看得到 ---------- */
+
+body {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+header {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-4);
+  box-sizing: border-box;
+  min-height: 56px;
+  padding: var(--space-2) var(--space-5);
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+
+/* 品牌：accent 漸層小方塊（純裝飾）＋名稱，右側細分隔線與分頁列隔開。 */
+h1 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  padding-right: var(--space-4);
+  border-right: 1px solid var(--border);
+  font-size: var(--text-lg);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+
+h1::before {
+  content: "";
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 7px;
+  background: linear-gradient(135deg, var(--accent-solid), var(--brand-2));
+  box-shadow:
+    inset 0 0 0 1px rgb(255 255 255 / 0.18),
+    0 2px 8px color-mix(in srgb, var(--accent-solid) 45%, transparent);
+}
+
+/* 分頁：凹槽裡的按鈕，選中項浮起（--raised＋陰影＋細框）、文字轉為前景色。 */
+nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 3px;
+  background: color-mix(in srgb, var(--fg) 4%, var(--bg));
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+nav button {
+  min-height: 30px;
+  padding: 0 var(--space-4);
+  border: none;
+  border-radius: calc(var(--radius) - 3px);
+  background: none;
+  color: var(--muted);
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background-color var(--ease),
+    color var(--ease),
+    box-shadow var(--ease);
+}
+
+nav button:hover:not(:disabled) {
+  color: var(--fg);
+  background: var(--hover);
+}
+
+nav button.active {
+  color: var(--fg);
+  background: var(--raised);
+  box-shadow:
+    var(--shadow-1),
+    inset 0 0 0 1px var(--border);
+}
+
+/*
+ * 標題列右端：程式版本與更新。版本號是「檢查更新」按鈕（muted 小字，hover 才浮出底色），檢查結果短暫顯示在它左邊，
+ * 有新版時更新入口接在右邊。整組靠右，結果文字出現時不會推動分頁列。
+ */
+.app-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-1) var(--space-3);
+  min-width: 0;
+  margin-left: auto;
+}
+
+button.app-version {
+  padding: 2px var(--space-2);
+  border: none;
+  border-radius: var(--radius-xs);
+  background: none;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition:
+    background-color var(--ease),
+    color var(--ease);
+}
+
+button.app-version:hover:not(:disabled) {
+  color: var(--fg);
+  background: var(--hover);
+}
+
+/* 檢查結果：檢查中 muted、已是最新版／有新版 success、失敗 error（要寫明，否則同權重的 muted 會蓋過全域 .error）。 */
+.app-version-status {
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+
+.app-version-status.ok {
+  color: var(--success);
+}
+
+.app-version-status.error {
+  color: var(--error);
+}
+
+/*
+ * 標題列中段：每個區服一組，第一行是 ACT 狀態 pill（狀態圓點＋「區服 ACT 狀態」；未設定 ACT 時只寫區服名稱、不畫圓點），
+ * 第二行是該區服執行中帳號的 PID（ACT 選遊戲程序時要用）。兩組並排，放不下時整組換到下一行；PID 可反白複製。
+ */
+.running-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  min-width: 0;
+  font-size: var(--text-xs);
+  line-height: 1.3;
+}
+
+.running-group {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+}
+
+.running-act {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  box-sizing: border-box;
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--fg) 4%, var(--bg));
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+/* 狀態圓點：未執行用 muted，執行中 success（.status-dot 自帶），找不到執行檔 error；文字另有狀態，不只靠顏色。 */
+.running-act.muted::before,
+.running-act.warn::before {
+  content: "";
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.running-act.warn {
+  border-color: color-mix(in srgb, var(--error) 40%, transparent);
+  background: color-mix(in srgb, var(--error) 10%, var(--bg));
+}
+
+.running-act.warn::before {
+  background: var(--error);
+}
+
+.running-act.status-dot {
+  border-color: color-mix(in srgb, var(--success) 40%, transparent);
+  background: color-mix(in srgb, var(--success) 10%, var(--bg));
+}
+
+.running-act.status-dot::before {
+  width: 7px;
+  height: 7px;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 25%, transparent);
+}
+
+/* 第二行：多個帳號同一行、以間隔分開，放不下才換行；與第一行同字級（不小於 12px），帳號名稱以 muted 的「PID」與粗體數字區隔。 */
+.running-games {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 var(--space-3);
+  min-width: 0;
+  padding-left: 10px;
+}
+
+.running-game {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.running-game-name {
+  max-width: 14em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.running-pid {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  user-select: text;
+}
+
+main {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--space-5) var(--space-6);
+  background: var(--surface);
+}
+
+/* 內容靠左、限制寬度；寬視窗不置中，換分頁時內容起點不跳動。 */
+main > section {
+  max-width: var(--content-w);
+}
+
+footer {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-5);
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+}
+
+#message {
+  min-height: 1.5em;
+  padding-left: var(--space-2);
+  border-left: 3px solid transparent;
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
+/* 沒有訊息時整條訊息列收起不佔高度；#message（aria-live）仍留在 DOM 裡，有訊息就照常出現。 */
+#message:empty {
+  min-height: 0;
+}
+
+footer:has(> #message:empty) {
+  padding-block: 0;
+  border-top-width: 0;
+}
+
+#message.ok {
+  color: var(--success);
+  border-left-color: var(--success);
+}
+
+#message.error {
+  color: var(--error);
+  border-left-color: var(--error);
+  font-weight: 600;
+}
+
+/* ---------- 程式更新入口：標題列右端版本號旁，有新版才出現；不擋畫面，所以沒有關閉鈕 ---------- */
+
+.app-update {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-1) var(--space-3);
+  min-width: 0;
+}
+
+/* 停用原因與失敗訊息：與按鈕同列的小字；失敗訊息只顯示一行，完整內容在訊息列。 */
+.app-update-note {
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+
+.app-update-note.error {
+  max-width: 36ch;
+  overflow: hidden;
+  color: var(--error);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 與 nav 分頁同高，標題列不因按鈕出現而變高。 */
+button.primary.app-update-go {
+  min-height: 30px;
+  padding: 0 var(--space-4);
+}
+
+.app-update-progress {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.app-update-progress > progress {
+  width: 120px;
+}
+
+.app-update-notes {
+  position: relative;
+}
+
+.app-update-notes > summary {
+  padding: 2px var(--space-1);
+  border-radius: var(--radius-xs);
+  color: var(--accent);
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+
+/* 說明是 latest.json 的純文字：保留換行；浮在主畫面上（與「更多」選單同一種浮層），太長就在框內捲動。 */
+.app-update-notes-body {
+  position: absolute;
+  top: calc(100% + var(--space-2));
+  right: 0;
+  z-index: 10;
+  box-sizing: border-box;
+  width: min(420px, calc(100vw - 48px));
+  max-height: 50vh;
+  overflow: auto;
+  padding: var(--space-2) var(--space-3);
+  background: var(--raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-2);
+  font-size: var(--text-sm);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  animation: menu-in var(--ease);
+}
+
+/* ---------- 標題與說明 ---------- */
+
+.hint {
+  margin: 0 0 var(--space-3);
+  max-width: 72ch;
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+
+.path {
+  font-family: "Cascadia Mono", Consolas, ui-monospace, monospace;
+  font-size: var(--text-xs);
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+/* 欄位與選項下方的說明小字；行寬同 .hint，寬的版面裡不拉成一長行。 */
+.field-hint {
+  max-width: 72ch;
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+}
+
+.field-error {
+  margin: 0;
+  color: var(--error);
+  font-size: var(--text-xs);
+}
+
+/* ---------- 區塊卡片：「擴充功能」的版本／設定檔／ACT／連動／ACT 連動與雙開，「設定」的遊戲路徑／資料位置／介面／免責與安全 ---------- */
+
+.dalamud-block,
+.act-block,
+.settings-block {
+  --panel-pad: var(--space-5);
+  margin: 0 0 var(--space-4);
+  padding: var(--space-4) var(--panel-pad) var(--panel-pad);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-1);
+}
+
+/* 卡片標題：「擴充功能」區服面板內的小標題（版本、設定檔、ACT、連動）與頁面層級的標題同一種樣式，都是卡片的標題列。 */
+.section-title,
+.subsection-title {
+  margin: 0;
+  color: var(--fg);
+  font-size: var(--text-lg);
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+/*
+ * 標題列：標題（緊接說明時連同說明）在上，滿版細分隔線與卡片內容隔開。標題緊接的 .hint 是卡片說明：與標題相距 4px，
+ * 寬度跟著卡片（分隔線要畫滿），不套 .hint 的行寬上限。
+ */
+:is(.dalamud-block, .act-block, .settings-block) > :is(.section-title, .subsection-title):not(:has(+ .hint)),
+:is(.dalamud-block, .act-block, .settings-block) > :is(.section-title, .subsection-title) + .hint {
+  max-width: none;
+  margin: 0 calc(-1 * var(--panel-pad)) var(--space-4);
+  padding: 0 var(--panel-pad) var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+
+:is(.dalamud-block, .act-block, .settings-block) > :is(.section-title, .subsection-title):has(+ .hint) {
+  margin-bottom: var(--space-1);
+}
+
+/* 卡片裡最後一段不留下邊距，卡片內距才上下一致。 */
+:is(.dalamud-block, .act-block, .settings-block) > :last-child {
+  margin-bottom: 0;
+}
+
+/* ---------- 巢狀卡片：「設定檔」區的設定檔（與就地展開的編輯表單）；在區塊卡片裡只畫外框（底色同卡片）、不加陰影 ---------- */
+
+.card {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3) var(--space-4);
+  margin-bottom: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.card-main {
+  flex: 1 1 240px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+}
+
+.title {
+  font-size: var(--text-lg);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
+.meta > * + *::before {
+  content: "·";
+  margin: 0 var(--space-2);
+  color: var(--muted);
+}
+
+.card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+/* ---------- badge 與 chip：膠囊、淡色底、同色字 ---------- */
+
+.badge {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  box-sizing: border-box;
+  height: 22px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--hover);
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+/* 區服、狀態、已儲存：該色 15% 的淡底＋同色字（深淺主題對實際疊色後的底色皆 ≥ 4.5:1）。兩個區服 badge 等寬。 */
+.badge.global,
+.badge.tw {
+  min-width: 4em;
+  color: var(--region);
+  border-color: color-mix(in srgb, var(--region) 30%, transparent);
+  background: color-mix(in srgb, var(--region) 15%, transparent);
+}
+
+.badge.running {
+  color: var(--error);
+  border-color: color-mix(in srgb, var(--error) 30%, transparent);
+  background: color-mix(in srgb, var(--error) 12%, transparent);
+}
+
+/* 狀態 badge 加圓點，和同色系的區服 badge 區分。 */
+.badge.running::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+/* 已儲存的密碼／OTP 金鑰：成功色，旁邊另有鎖頭圖示與文字，不只靠顏色。 */
+.badge.saved {
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 30%, transparent);
+  background: color-mix(in srgb, var(--success) 15%, transparent);
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  font-size: var(--text-xs);
+}
+
+.chips-label {
+  color: var(--muted);
+}
+
+.chip {
+  max-width: 100%;
+  padding: 1px var(--space-2);
+  border: 1px solid color-mix(in srgb, var(--region) 30%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--region) 14%, transparent);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- 子分頁：「擴充功能」外層（Dalamud／ACT）是 underline，兩頁內的區服是 segmented ---------- */
+
+/* 外層：滿版細線上的文字分頁，選中項前景色＋accent 底線（由中間展開）。 */
+.subtabs {
+  display: flex;
+  gap: var(--space-5);
+  margin: 0 0 var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+
+.subtab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 42px;
+  padding: 0 2px;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: var(--text-lg);
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background-color var(--ease),
+    color var(--ease),
+    box-shadow var(--ease);
+}
+
+.subtab::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  bottom: -1px;
+  left: 0;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: var(--accent);
+  transform: scaleX(0);
+  transition: transform var(--ease);
+}
+
+.subtab:hover:not(:disabled),
+.subtab[aria-selected="true"] {
+  color: var(--fg);
+}
+
+.subtab[aria-selected="true"]::after {
+  transform: scaleX(1);
+}
+
+/* 內層（區服，在 Dalamud／ACT 的 tabpanel 裡）：凹槽裡的按鈕，選中項浮起、文字用區服色。 */
+[role="tabpanel"] > .subtabs {
+  width: fit-content;
+  max-width: 100%;
+  gap: 2px;
+  padding: 3px;
+  background: var(--field);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+[role="tabpanel"] > .subtabs > .subtab {
+  min-height: 30px;
+  padding: 0 var(--space-3);
+  border-radius: calc(var(--radius-sm) - 3px);
+  font-size: var(--text-md);
+}
+
+[role="tabpanel"] > .subtabs > .subtab::after {
+  content: none;
+}
+
+[role="tabpanel"] > .subtabs > .subtab:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+[role="tabpanel"] > .subtabs > .subtab[aria-selected="true"] {
+  color: var(--region);
+  background: var(--raised);
+  box-shadow:
+    var(--shadow-1),
+    inset 0 0 0 1px var(--border);
+}
+
+.subtab-count {
+  min-width: 20px;
+  padding: 0 var(--space-2);
+  border-radius: 999px;
+  background: var(--hover);
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  line-height: 18px;
+  text-align: center;
+}
+
+/* ---------- 登入分頁：全高側欄（帳號）＋內容區（登入表單直接鋪在內容區上） ---------- */
+
+/* 登入分頁貼齊 main：不留外圍 padding，側欄與內容區各自捲動。 */
+main:has(> #tab-login:not([hidden])) {
+  padding: 0;
+  overflow: hidden;
+}
+
+main > #tab-login {
+  max-width: none;
+  height: 100%;
+}
+
+.login-layout {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  height: 100%;
+}
+
+/* 側欄（Discord 式帳號列）：分組標題、帳號列與提示文字的左緣對齊（側欄內距 --space-2＋各自 --space-2／--space-3）。 */
+.account-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  overflow-y: auto;
+  padding: var(--space-3) var(--space-2) var(--space-4);
+  background: var(--sidebar);
+  border-right: 1px solid var(--border);
+}
+
+.account-pane > .hint {
+  padding: 0 var(--space-3);
+}
+
+/* 伺服器狀態（兩服各一）：有該服分組時接在分組標題右側，否則是清單頂端的一行；狀態是圓點＋文字，不只靠顏色。 */
+.server-line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-3) var(--space-2);
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+
+.server-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--fg);
+  font-weight: 600;
+}
+
+/* 查詢中／未知：muted 圓點。 */
+.server-state::before {
+  content: "";
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.server-state.ok {
+  color: var(--success);
+}
+
+.server-state.error {
+  color: var(--error);
+}
+
+.server-state.ok::before,
+.server-state.error::before {
+  background: currentColor;
+  box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 22%, transparent);
+}
+
+.account-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: var(--space-3);
+}
+
+/* 分組標題列：區服名稱（小字、字距加寬、粗體 muted）在左，右側是該服伺服器狀態。 */
+.account-group-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0 var(--space-2);
+  min-height: 28px;
+  padding: 0 var(--space-2) 0 var(--space-3);
+}
+
+.account-group-title {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.14em;
+}
+
+.account-group-head > .server-line {
+  padding: 0;
+}
+
+/*
+ * 帳號列：整列是一個按鈕（頭像＋文字），點選切換右側表單的帳號。左緣貼著側欄邊的指示條：hover 露出短條、選中拉成長條（accent），
+ * 頭像同時由圓形轉為圓角方形；只動 transform／border-radius。
+ */
+.account-item {
+  --avatar-ring: var(--sidebar);
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  min-width: 0;
+  min-height: 52px;
+  padding: 6px var(--space-2);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--muted);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color var(--ease),
+    color var(--ease);
+}
+
+.account-item::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: calc(-1 * var(--space-2));
+  width: 4px;
+  height: 32px;
+  margin-top: -16px;
+  border-radius: 0 4px 4px 0;
+  background: var(--fg);
+  transform: scaleY(0);
+  transition:
+    transform var(--ease),
+    background-color var(--ease);
+}
+
+.account-item:hover:not(:disabled) {
+  --avatar-ring: var(--sidebar-hover);
+  background: var(--sidebar-hover);
+  color: var(--fg);
+}
+
+.account-item:hover:not(:disabled)::before {
+  transform: scaleY(0.4);
+}
+
+.account-item[aria-current="true"] {
+  --avatar-ring: var(--sidebar-selected);
+  background: var(--sidebar-selected);
+  color: var(--fg);
+}
+
+.account-item[aria-current="true"]::before {
+  background: var(--accent);
+  transform: scaleY(1);
+}
+
+.account-item-text {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.account-item-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+/* 名稱、帳號、上次結果各一行，超出省略。 */
+.account-item-name,
+.account-item-meta,
+.account-item-last {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-item-name {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.account-item-meta {
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+
+.account-item-last {
+  font-size: var(--text-xs);
+}
+
+/* 頭像：區服色縮寫（不透明底，選中列的底色不影響對比）＋右下角區服色點；色點外圈跟著所在列的底色。 */
+.avatar {
+  position: relative;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--region) 20%, var(--sidebar));
+  color: var(--region);
+  font-size: var(--text-sm);
+  font-weight: 700;
+  line-height: 1;
+  user-select: none;
+  transition:
+    border-radius var(--ease),
+    background-color var(--ease),
+    color var(--ease),
+    border-color var(--ease);
+}
+
+.account-item:hover:not(:disabled) .avatar,
+.account-item[aria-current="true"] .avatar {
+  border-radius: 12px;
+}
+
+/* 側欄頭像右下角的區服色點；外圈跟著所在列的底色。 */
+.account-item > .avatar.global::after,
+.account-item > .avatar.tw::after {
+  content: "";
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--region);
+  box-shadow: 0 0 0 2.5px var(--avatar-ring);
+  transition: box-shadow var(--ease);
+}
+
+.avatar.avatar-add {
+  background: var(--card);
+  border: 1px dashed var(--border-strong);
+  color: var(--accent);
+  font-weight: 400;
+}
+
+/* 遊戲執行中：名稱旁的小綠點＋文字。 */
+.status-dot {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--success);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+.status-dot::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+/* 密碼未儲存：名稱旁的小開鎖圖示（說明文字在 visually-hidden 與 title）。 */
+.account-item-flag {
+  flex: none;
+  display: inline-flex;
+  color: var(--muted);
+}
+
+.account-item-flag > .lock-icon {
+  width: 13px;
+  height: 13px;
+}
+
+/* 新增帳號：虛線圓圈的「＋」；hover／選中時填滿 accent、轉成圓角方形（同帳號頭像）。 */
+.account-item.account-add {
+  margin-top: var(--space-3);
+  font-weight: 600;
+}
+
+.account-item.account-add:hover:not(:disabled) .avatar-add,
+.account-item.account-add[aria-current="true"] .avatar-add {
+  background: var(--accent-solid);
+  border-color: transparent;
+  color: var(--on-accent);
+}
+
+/*
+ * 官方消息面板：接在帳號清單之後，跟著登入面板目前的區服（.global／.tw 決定 --region）。整塊是區服色淡淡著色的底（混入 --sidebar：
+ * 淺色 8%、深色 10%）＋左緣 3px 區服色細條，標題（CSS 畫的報紙圖示＋「國際服消息」／「繁中服消息」）用區服色。每則是一塊小底
+ * （面板上再疊 6% 區服色，則與則之間留 4px 縫，讓每條分得開）：標題 --fg、最多兩行、超出省略（完整標題在 title），日期小字 muted；
+ * hover 改疊 10%。文字對比（標題、日期、說明小字對底色與 hover 底色）
+ * 在深淺兩種主題都 ≥ 4.5:1，改色或改百分比要重算。側欄本身會捲動（.account-pane overflow-y），這一段不縮，帳號多時整欄一起捲動。
+ */
+.news-group {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: var(--space-5);
+  padding: var(--space-1) var(--space-1) var(--space-2) calc(3px + var(--space-1));
+  border-radius: var(--radius-sm);
+  background: light-dark(
+    color-mix(in srgb, var(--region) 8%, var(--sidebar)),
+    color-mix(in srgb, var(--region) 10%, var(--sidebar))
+  );
+  box-shadow: inset 3px 0 0 var(--region);
+}
+
+.news-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 28px;
+  margin: 0;
+  padding: 0 var(--space-2);
+  color: var(--region);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.14em;
+}
+
+/* 報紙圖示（純裝飾）：外框＋左上的圖片方塊、右側兩條短線、下方一條長線，全用 currentColor。 */
+.news-icon {
+  flex: none;
+  box-sizing: border-box;
+  width: 15px;
+  height: 13px;
+  border: 1.5px solid currentColor;
+  border-radius: 2px;
+  background:
+    linear-gradient(currentColor 0 0) 2px 2px / 4px 3px no-repeat,
+    linear-gradient(currentColor 0 0) 7px 2px / 3px 1.5px no-repeat,
+    linear-gradient(currentColor 0 0) 7px 4.5px / 3px 1.5px no-repeat,
+    linear-gradient(currentColor 0 0) 2px 7px / 8px 1.5px no-repeat;
+}
+
+.news-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.news-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  min-width: 0;
+  padding: 6px var(--space-2);
+  border: none;
+  border-radius: var(--radius-xs);
+  background: color-mix(in srgb, var(--region) 6%, transparent);
+  color: var(--fg);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--ease);
+}
+
+.news-item:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--region) 10%, transparent);
+}
+
+.news-item-title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.news-item-date {
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 載入中、取不到（可點擊重試）、沒有消息：一行 muted 小字，左緣與標題對齊。 */
+.news-note {
+  margin: 0;
+  padding: 0 var(--space-2);
+  color: var(--muted);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+}
+
+button.news-retry {
+  border: none;
+  border-radius: var(--radius-xs);
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+
+button.news-retry:hover:not(:disabled) {
+  color: var(--fg);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+/*
+ * 右側內容區：自己捲動。登入表單不另成卡片，直接鋪在內容區上、靠左填滿；寬視窗時表單最寬 960px，欄位不拉到難讀的寬度
+ * （同「擴充功能」「設定」的內容靠左、限制寬度）。預設視窗（960×680）的已存帳號收起「進階」時不必捲動。
+ */
+.login-main {
+  min-width: 0;
+  overflow-y: auto;
+  padding: var(--space-5) var(--space-6) var(--space-6);
+  background: var(--surface);
+}
+
+.login-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  max-width: 960px;
+}
+
+/*
+ * 內容區頂部的頁首：名稱與同一行的區服 badge（基線對齊），已存帳號最右側是「⋯」選單；
+ * 下方細分隔線與欄位隔開。區服跟著 badge（新增帳號切換區服時也跟著變）。
+ */
+.login-head {
+  --region: var(--region-global);
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  margin-bottom: var(--space-1);
+  padding-bottom: var(--space-5);
+  border-bottom: 1px solid var(--border);
+}
+
+.login-head:has(.badge.tw) {
+  --region: var(--region-tw);
+}
+
+/* 名稱（或重新命名的輸入框）與 badge 同一行、基線對齊；佔滿頁首剩下的寬度，「⋯」靠右。 */
+.login-identity {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px var(--space-3);
+}
+
+.login-title {
+  min-width: 0;
+  margin: 0;
+  font-size: var(--text-2xl);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+/* 就地重新命名：與標題同字級的輸入框。 */
+input.login-title-input {
+  width: min(100%, 18em);
+  min-height: 0;
+  padding: 0 var(--space-2);
+  font-size: var(--text-2xl);
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+input.card-title-input {
+  flex: 0 1 16em;
+  min-width: 0;
+  min-height: 0;
+  padding: 0 var(--space-2);
+  font-size: var(--text-lg);
+  font-weight: 600;
+}
+
+/* 登入／儲存期間整組停用；「登入」列不在裡面，下載的「取消」才按得到。 */
+fieldset.login-fields {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: none;
+}
+
+.login-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* 欄位標籤：小字、粗體、字距加寬的 muted（同側欄分組標題的語氣）。 */
+.login-field > label,
+.login-label {
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+/* 標籤列：標籤在左，同列右側放精簡選項（OTP 方式、記住密碼）。 */
+.login-label-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-3);
+}
+
+/* 依選項切換的一組（欄位＋錯誤＋說明）：不另成一層，沿用 .login-field 的間距。 */
+.login-field-part {
+  display: contents;
+}
+
+.login-field > input,
+.login-field > select,
+.login-field-part > input {
+  width: 100%;
+  min-height: var(--control-h-lg);
+}
+
+/* 短欄位兩欄並排；放不下兩欄（窄視窗）就自動換行成單欄。隱藏的欄（台服沒有語言）不佔位，另一欄佔滿整列；整列的欄都隱藏時整列不佔位。 */
+.login-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.login-row:not(:has(> :not([hidden]))) {
+  display: none;
+}
+
+.login-row > .login-field {
+  flex: 1 1 240px;
+  min-width: 0;
+}
+
+/* 帳號｜密碼兩欄：密碼的已儲存狀態列（鎖頭、遮罩、已儲存、更換、清除）約要 250px，放不下就換行成上下排。 */
+.login-credentials > .login-field {
+  flex-basis: 250px;
+}
+
+/* 兩欄的標籤列同高，輸入框才對齊（密碼欄標籤列右側有「記住密碼」）。 */
+.login-credentials > .login-field > label,
+.login-credentials .login-label-row {
+  min-height: 22px;
+}
+
+.login-credentials > .login-field > label {
+  display: flex;
+  align-items: center;
+}
+
+/* OTP 碼：輸入後加字距、等寬數字，方便核對。 */
+#login-otp:not(:placeholder-shown) {
+  letter-spacing: 0.2em;
+  font-variant-numeric: tabular-nums;
+}
+
+.lock-icon {
+  flex: none;
+  width: 16px;
+  height: 16px;
+}
+
+/*
+ * 已儲存的密碼／OTP 金鑰：取代輸入框的唯讀狀態列，與輸入框同高、同底色、同中性邊框；鎖頭＋遮罩＋「已儲存」，右側是 ghost 按鈕。
+ * 成功色只用在「已儲存」badge。OTP 金鑰還併入目前 OTP；窄視窗換行，不重疊。
+ */
+.secret-stored {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  box-sizing: border-box;
+  min-height: var(--control-h-lg);
+  padding: var(--space-1) var(--space-1) var(--space-1) var(--space-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--field);
+}
+
+.secret-stored > .lock-icon {
+  color: var(--muted);
+}
+
+.secret-mask {
+  color: var(--muted);
+  letter-spacing: 0.15em;
+}
+
+.secret-actions {
+  display: flex;
+  gap: 2px;
+  margin-left: auto;
+}
+
+/* 欄位下方的狀態小字：尚未儲存（開鎖、muted）、更換中、將刪除（開鎖、紅字加粗）。 */
+.secret-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+
+.secret-note > .lock-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.secret-note.pending {
+  color: var(--error);
+  font-weight: 600;
+}
+
+/* 句中的「取消」是文字連結；句尾的「復原」是 ghost 按鈕，與小字同字級。 */
+.secret-note > button {
+  font-size: var(--text-xs);
+}
+
+.secret-note > button.ghost {
+  min-height: 24px;
+}
+
+/*
+ * 目前 OTP 預覽：與驗證器 App 比對用的大字等寬碼＋剩餘秒數環；金鑰已儲存時併在「已儲存」列，其他狀態排在金鑰欄下方
+ * （只畫外框，底色同卡片）。
+ */
+.otp-preview {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  box-sizing: border-box;
+  min-height: var(--control-h-lg);
+  padding: var(--space-1) var(--space-1) var(--space-1) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+/* 併在「已儲存」列時不另加框，以細分隔線和遮罩／「已儲存」隔開。 */
+.secret-stored > .otp-preview {
+  min-height: 0;
+  padding: 0 0 0 var(--space-3);
+  border: 0;
+  border-left: 1px solid var(--border);
+  border-radius: 0;
+}
+
+.otp-preview-live {
+  min-width: 0;
+}
+
+.otp-preview-current {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.otp-preview-label {
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+
+.otp-preview-code {
+  font-family: "Cascadia Mono", Consolas, ui-monospace, monospace;
+  font-size: var(--text-xl);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.06em;
+  line-height: 1.2;
+}
+
+.otp-preview-message {
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+
+.otp-preview-message.error {
+  color: var(--error);
+  font-weight: 600;
+}
+
+.otp-preview-timer {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 剩餘秒數環：--otp-left 為 0–1（main.ts 每秒更新），accent 弧對底色 ≥ 3:1。 */
+.otp-preview-ring {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: conic-gradient(
+    var(--accent) calc(var(--otp-left, 1) * 1turn),
+    color-mix(in srgb, var(--fg) 18%, transparent) 0
+  );
+  mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));
+}
+
+.otp-preview > button.ghost {
+  margin-left: auto;
+}
+
+/* segmented（新增帳號的區服、OTP 方式）：原生 radio 視覺隱藏（仍可聚焦、方向鍵切換），由標籤呈現選中與焦點。凹槽＋浮起的選中項。 */
+.segmented {
+  display: grid;
+  grid-auto-columns: 1fr;
+  grid-auto-flow: column;
+  gap: 2px;
+  padding: 3px;
+  background: var(--field);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.segmented label {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  padding: 0 var(--space-3);
+  border-radius: calc(var(--radius-sm) - 3px);
+  color: var(--muted);
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color var(--ease),
+    color var(--ease),
+    box-shadow var(--ease);
+}
+
+/* 精簡版：放在標籤列右側。 */
+.segmented.segmented-sm label {
+  min-height: 26px;
+  padding: 0 var(--space-3);
+  font-size: var(--text-xs);
+}
+
+/* 選擇器要比通用的 input／input:disabled 規則具體，否則 opacity 等會被蓋回來。 */
+.segmented label > input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  min-height: 0;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  appearance: none;
+  opacity: 0;
+}
+
+.segmented label:hover:not(:has(:checked)) {
+  color: var(--fg);
+  background: var(--hover);
+}
+
+/* 區服用區服色；其他（OTP 方式）沒有 --region，用 accent。 */
+.segmented label:has(:checked) {
+  color: var(--region, var(--accent));
+  background: var(--raised);
+  box-shadow:
+    var(--shadow-1),
+    inset 0 0 0 1px var(--border);
+}
+
+.segmented label:has(:focus-visible) {
+  outline: var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* 表單內的提示與錯誤（未設定遊戲路徑、登入失敗）：純文字。 */
+.login-alert {
+  margin: 0;
+  color: var(--error);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
+/* 維修中：淡色底、同色細框的提示。 */
+.login-alert.callout {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid color-mix(in srgb, var(--error) 35%, transparent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--error) 10%, transparent);
+}
+
+/* 「進階」與設定檔編輯的「進階」：摘要列左側箭頭（收起向右、展開向下）。 */
+.editor-advanced > summary {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-xs);
+  color: var(--muted);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  list-style: none;
+  cursor: pointer;
+  transition:
+    background-color var(--ease),
+    color var(--ease);
+}
+
+.editor-advanced > summary::-webkit-details-marker,
+.safety-group > summary::-webkit-details-marker,
+.license-doc > summary::-webkit-details-marker {
+  display: none;
+}
+
+.editor-advanced > summary::before,
+.safety-group > summary::before,
+.license-doc > summary::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin: 0 10px 2px 2px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  vertical-align: middle;
+  transform: rotate(-45deg);
+  transition: transform var(--ease);
+}
+
+.editor-advanced[open] > summary::before,
+.safety-group[open] > summary::before,
+.license-doc[open] > summary::before {
+  transform: rotate(45deg);
+}
+
+.editor-advanced > summary:hover {
+  color: var(--fg);
+  background: var(--hover);
+}
+
+/* 設定檔編輯的「進階」展開內容：左側細線＋內縮，看得出「進階」到哪裡結束。 */
+.editor-advanced-body {
+  margin-top: var(--space-3);
+  padding-left: var(--space-4);
+  border-left: 2px solid var(--border);
+}
+
+/* 登入的「進階」摘要：滿寬、無框的一列，「進階」用一般文字色，後面列出目前的設定檔、語言與額外參數（muted），太長以省略號截斷。 */
+.login-advanced > summary {
+  width: auto;
+  margin: 0 calc(-1 * var(--space-2));
+  padding: var(--space-2);
+  color: var(--fg);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.login-advanced-value {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+/* 登入的「進階」展開內容：單層的三段（Dalamud、ACT、啟動參數），各以小標題＋分隔線開頭，不另成卡片。 */
+.login-advanced-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  padding-left: 0;
+  border-left: none;
+}
+
+.adv-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* 段落小標題：前景色、比欄位標籤大一階；右側細線延伸到卡片內容右緣。 */
+.adv-heading {
+  display: flex;
+  align-items: center;
+  align-self: stretch;
+  gap: var(--space-3);
+  margin: 0;
+  color: var(--fg);
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+
+.adv-heading::after {
+  content: "";
+  flex: 1;
+  border-top: 1px solid var(--border);
+}
+
+/* 設定檔與語言同一列：語言只佔選項文字所需的寬度，其餘都給設定檔。 */
+.login-dalamud-row > .login-dalamud {
+  flex: 1 1 260px;
+}
+
+.login-dalamud-row > .login-language {
+  flex: 0 0 auto;
+}
+
+/* 「進階」內的設定檔資訊：間距交給段落的 gap。 */
+.login-dalamud-info {
+  margin: 0;
+}
+
+/* 兩個按鈕自成一組跟在摘要後：前面不加「·」，換行時整組移到下一行，不留孤立的分隔點。 */
+.login-dalamud-links {
+  display: inline-flex;
+  gap: 2px;
+  padding-left: var(--space-2);
+}
+
+.meta > .login-dalamud-links::before {
+  content: none;
+}
+
+/* 「ACT 跟這個帳號」：勾選不撐滿整列；不用 .login-field，勾選文字才不會變成標籤樣式。 */
+.adv-section.login-act-follow {
+  align-items: flex-start;
+}
+
+/*
+ * 「登入」列：表單的底部，上方細分隔線。由上而下：錯誤、遊戲更新提示與進度（含完整性檢查的進度與結果）、
+ * 按鈕（登入＋僅儲存）、登入進度。#patch-status 不成框（display: contents），子元素直接排進這一欄，沒有內容時不佔間距。
+ */
+.login-submit-bar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-top: var(--space-1);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border);
+}
+
+.patch-status {
+  display: contents;
+}
+
+.login-buttons {
+  display: flex;
+  gap: var(--space-2);
+}
+
+/* 「登入」「僅儲存」44px；選擇器要比 button.primary／secondary 具體，否則被後面的通用高度蓋回 --control-h。 */
+.login-buttons > button.primary,
+.login-buttons > button.secondary {
+  min-height: 44px;
+}
+
+.login-buttons > button.secondary {
+  padding: 0 var(--space-5);
+}
+
+/*
+ * 「登入」：整頁最強的主動作，佔滿按鈕列（與上方欄位同寬）。accent 漸層＋發光陰影；hover 浮起 1px、陰影加深；
+ * 按下回到原位並收起光暈；focus ring 同全域。reduced motion 下沒有過場（浮起直接到位）。
+ */
+.login-panel .login-submit {
+  flex: 1 1 auto;
+  font-size: var(--text-lg);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  background: linear-gradient(180deg, var(--accent-solid), color-mix(in srgb, var(--accent-solid) 82%, var(--accent-solid-hover)));
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.2),
+    0 6px 18px -6px color-mix(in srgb, var(--accent-solid) 75%, transparent);
+}
+
+.login-panel .login-submit:hover:not(:disabled) {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent-solid) 70%, var(--accent-solid-hover)), var(--accent-solid-hover));
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.2),
+    0 10px 24px -6px color-mix(in srgb, var(--accent-solid) 90%, transparent);
+  transform: translateY(-1px);
+}
+
+.login-panel .login-submit:active:not(:disabled) {
+  background: var(--accent-solid-hover);
+  box-shadow: inset 0 2px 4px rgb(0 0 0 / 0.25);
+  transform: translateY(1px);
+}
+
+.login-panel .login-submit:disabled {
+  box-shadow: none;
+}
+
+/* 下載進度：說明文字在上，進度條與「取消」在下；登入面板與「擴充功能 › Dalamud」共用。 */
+.progress-view {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+
+.progress-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.progress-row progress {
+  flex: 1;
+  min-width: 0;
+}
+
+.progress-row button.progress-cancel {
+  min-height: 28px;
+  padding: 0 var(--space-3);
+  font-size: var(--text-sm);
+}
+
+/* 遊戲更新提示（待套用更新、更新中斷標記、重新登入提示）：淡色底、同色細框，文字與按鈕同一列（窄時換行）。 */
+.patch-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid color-mix(in srgb, var(--accent-solid) 35%, transparent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--accent-solid) 10%, transparent);
+  font-size: var(--text-sm);
+}
+
+.patch-note > p {
+  flex: 1 1 16em;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* 更新中斷：同維修中提示的錯誤色。 */
+.patch-note.warn {
+  border-color: color-mix(in srgb, var(--error) 35%, transparent);
+  background: color-mix(in srgb, var(--error) 10%, transparent);
+}
+
+/* 國際服完整性檢查的最近結果：「登入」列裡、按鈕上方。 */
+.integrity-result {
+  max-width: 72ch;
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+
+.integrity-result.ok {
+  color: var(--success);
+}
+
+.integrity-result p {
+  margin: 0;
+}
+
+.integrity-list-title {
+  margin-top: var(--space-2);
+  font-weight: 600;
+}
+
+.integrity-list {
+  margin: var(--space-1) 0 0;
+  padding-left: 1.5em;
+}
+
+label.check {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--fg);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  user-select: none;
+}
+
+/* ---------- 擴充功能分頁 ---------- */
+
+/* 頂端的第三方工具風險提醒：一行小字的提示條，連結與文字同大小。 */
+.ext-risk-note {
+  max-width: none;
+  margin-bottom: var(--space-4);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--card);
+  font-size: var(--text-xs);
+}
+
+.ext-risk-note > button.link {
+  font-size: inherit;
+}
+
+/* Dalamud 頁「版本」卡片：一列靠左——版本（台服下拉／國際服文字）、主按鈕、「更多」。 */
+.install-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+}
+
+.install-bar + * {
+  margin-top: var(--space-3);
+}
+
+.install-status {
+  font-weight: 600;
+}
+
+.dalamud-block > .field-error,
+.dalamud-block > .progress-view {
+  margin: 0 0 var(--space-3);
+  max-width: 520px;
+}
+
+/* 「設定檔」卡片最下方的「新增空白設定檔」：ghost 按鈕，左緣對齊卡片內容。 */
+.dalamud-block > .toolbar {
+  margin-left: calc(-1 * var(--space-2));
+}
+
+/* ---------- 「更多」選單：summary 長得像次要按鈕（或低調的「⋯」圖示按鈕），選單浮在下方靠右 ---------- */
+
+details.menu {
+  position: relative;
+}
+
+details.menu > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  box-sizing: border-box;
+  min-height: var(--control-h);
+  padding: 0 var(--space-3) 0 var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--raised);
+  box-shadow: var(--shadow-1);
+  font-weight: 500;
+  white-space: nowrap;
+  list-style: none;
+  cursor: pointer;
+  transition:
+    background-color var(--ease),
+    border-color var(--ease),
+    box-shadow var(--ease),
+    transform var(--ease);
+}
+
+details.menu > summary::-webkit-details-marker {
+  display: none;
+}
+
+details.menu > summary::after {
+  content: "";
+  width: 5px;
+  height: 5px;
+  margin: 0 2px 3px 2px;
+  border-right: 1.5px solid var(--muted);
+  border-bottom: 1.5px solid var(--muted);
+  transform: rotate(45deg);
+  transition: transform var(--ease);
+}
+
+details.menu[open] > summary::after {
+  margin-bottom: -2px;
+  transform: rotate(-135deg);
+}
+
+details.menu > summary:hover,
+details.menu[open] > summary {
+  background: color-mix(in srgb, var(--fg) 6%, var(--raised));
+  border-color: color-mix(in srgb, var(--fg) 18%, transparent);
+}
+
+/* 「⋯」（登入頁頁首）：平常無框無底、muted 圖示，hover 與展開時才有淡底；與一般按鈕同高的正方形。 */
+details.menu.menu-icon > summary {
+  justify-content: center;
+  width: var(--control-h);
+  padding: 0;
+  border-color: transparent;
+  background: none;
+  box-shadow: none;
+  color: var(--muted);
+}
+
+details.menu.menu-icon > summary::after {
+  content: none;
+}
+
+details.menu.menu-icon > summary:hover,
+details.menu.menu-icon[open] > summary {
+  border-color: transparent;
+  background: var(--hover);
+  color: var(--fg);
+}
+
+.more-icon {
+  width: 18px;
+  height: 18px;
+}
+
+.menu-list {
+  position: absolute;
+  top: calc(100% + var(--space-1));
+  right: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  min-width: 10em;
+  padding: var(--space-1);
+  background: var(--raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-2);
+  animation: menu-in var(--ease);
+}
+
+/* 展開：淡入並由上方滑下 4px（只動 opacity／transform）。 */
+@keyframes menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+.menu-item {
+  min-height: 32px;
+  padding: 0 var(--space-3);
+  border: none;
+  border-radius: var(--radius-xs);
+  background: none;
+  color: inherit;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color var(--ease);
+}
+
+.menu-item:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+/* 組與組之間的分隔線：滿版到選單內緣。 */
+.menu-sep {
+  height: 1px;
+  margin: var(--space-1) calc(-1 * var(--space-1));
+  background: var(--border);
+}
+
+.menu-item.menu-danger {
+  color: var(--error);
+}
+
+.menu-item.menu-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--error) 12%, transparent);
+}
+
+/* ---------- Dalamud 設定檔：卡片就地展開的編輯表單 ---------- */
+
+/* 表單就是卡片本身（accent 細框表示編輯中）；標籤在上、欄位在下，與登入面板一致。 */
+.card.profile-editor {
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-4);
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+}
+
+.profile-editor .login-field {
+  max-width: 420px;
+}
+
+.editor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+/* ---------- ACT 頁 ---------- */
+
+/* 兩服共用的「ACT 連動與雙開」：與區服子分頁同一層，排在區服卡片之後，上方多留一段距離。 */
+.act-shared {
+  margin-top: var(--space-5);
+}
+
+/* 選擇：下拉選單佔滿，選中項目的路徑以小字顯示在下方；選「其他」時改顯示路徑輸入框與「儲存」。 */
+.act-choice {
+  display: grid;
+  gap: var(--space-1);
+  margin-bottom: var(--space-3);
+}
+
+.act-choice select {
+  width: 100%;
+}
+
+/* 自行輸入路徑：輸入框佔滿，「儲存」在右。 */
+.act-path {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-3);
+}
+
+.act-path input {
+  width: 100%;
+}
+
+/* 狀態列：狀態 pill（圓點＋文字）、「立即開啟 ACT」、「重新檢查」；插件版本列同一種排法。 */
+.act-status-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.act-state {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  box-sizing: border-box;
+  height: 28px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-weight: 600;
+}
+
+/* ACT 頁區服子分頁上的 ACT 狀態：小一號的圓點＋短字。 */
+.subtab-status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-weight: 500;
+}
+
+/* 圓點之外另有文字，不只靠顏色；未執行／未設定／檢查中用 muted。 */
+.act-state::before,
+.subtab-status::before {
+  content: "";
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.subtab-status::before {
+  width: 6px;
+  height: 6px;
+}
+
+.act-state.running,
+.subtab-status.running {
+  color: var(--success);
+}
+
+.act-state.running::before,
+.subtab-status.running::before {
+  background: var(--success);
+}
+
+.act-state.running {
+  border-color: color-mix(in srgb, var(--success) 35%, transparent);
+  background: color-mix(in srgb, var(--success) 10%, var(--card));
+}
+
+.act-state.missing,
+.subtab-status.missing {
+  color: var(--error);
+}
+
+.act-state.missing::before,
+.subtab-status.missing::before {
+  background: var(--error);
+}
+
+.act-state.missing {
+  border-color: color-mix(in srgb, var(--error) 35%, transparent);
+  background: color-mix(in srgb, var(--error) 10%, var(--card));
+}
+
+.act-block > label.check {
+  margin-bottom: var(--space-2);
+}
+
+/* 「連動」：這一服 ACT 的連動狀態一行。 */
+.act-link-state {
+  margin: 0 0 var(--space-2);
+  font-weight: 600;
+}
+
+.act-link-state.registered {
+  color: var(--success);
+}
+
+.act-link-state.exeMissing,
+.act-link-state.unreadable {
+  color: var(--error);
+}
+
+/* 「ACT 連動與雙開」的兩個按鈕。 */
+.act-link-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.act-link-warn {
+  color: var(--error);
+}
+
+/* ---------- 設定分頁 ---------- */
+
+/* 區塊卡片裡的設定列：只畫外框的列（遊戲路徑每服一列、資料位置一列、介面每個選項一列）。 */
+.setting-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3) var(--space-4);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.setting-row + .setting-row {
+  margin-top: var(--space-2);
+}
+
+/* 固定 badge 欄寬，國際服／台服的輸入框左右緣對齊。 */
+.setting-row.path-setting {
+  display: grid;
+  grid-template-columns: 4.5em minmax(0, 1fr) auto auto;
+  gap: var(--space-3);
+}
+
+.setting-row.path-setting > .badge {
+  align-self: center;
+  justify-self: start;
+}
+
+.path-setting input {
+  width: 100%;
+}
+
+/* 「介面」的選項列：標籤＋segmented，兩列的 segmented 左緣對齊；說明小字接在 segmented 正下方。 */
+.setting-row.choice-setting {
+  display: grid;
+  grid-template-columns: 6em auto;
+  justify-content: start;
+  align-items: center;
+  gap: var(--space-2) var(--space-4);
+}
+
+.choice-setting > .choice-label {
+  font-weight: 600;
+}
+
+.choice-setting > .field-hint {
+  grid-column: 2;
+}
+
+/* 「免責與安全」：四組各自摺疊的手風琴列，組與組之間細線。標題只在從「擴充功能」連過來時以程式取得焦點（供螢幕閱讀器），不畫 focus ring。 */
+.safety-block > .section-title:focus {
+  outline: none;
+}
+
+.safety-group + .safety-group {
+  margin-top: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border);
+}
+
+.safety-group > summary {
+  width: fit-content;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-xs);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  list-style: none;
+  cursor: pointer;
+  transition: background-color var(--ease);
+}
+
+.safety-group > summary:hover {
+  background: var(--hover);
+}
+
+.safety-list {
+  max-width: 72ch;
+  margin: var(--space-2) 0 var(--space-3);
+  padding-left: var(--space-6);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+
+.safety-list li + li {
+  margin-top: var(--space-1);
+}
+
+.safety-list ul {
+  margin: var(--space-1) 0 0;
+  padding-left: var(--space-5);
+  color: var(--muted);
+}
+
+/* 「授權與第三方聲明」：三份文件各自再摺疊一層（內縮對齊條列）；全文是純文字，保留換行，太長就在框內捲動。 */
+.license-intro {
+  margin: var(--space-2) 0 var(--space-2) var(--space-6);
+}
+
+.license-doc {
+  margin-left: var(--space-5);
+}
+
+.license-doc > summary {
+  width: fit-content;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-xs);
+  font-size: var(--text-sm);
+  list-style: none;
+  cursor: pointer;
+  transition: background-color var(--ease);
+}
+
+.license-doc > summary:hover {
+  background: var(--hover);
+}
+
+.license-text {
+  max-height: 24rem;
+  margin: var(--space-1) 0 var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  overflow: auto;
+  background: var(--field);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: "Cascadia Mono", Consolas, ui-monospace, monospace;
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- 對話框 ---------- */
+
+dialog {
+  min-width: 340px;
+  padding: var(--space-5);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--card);
+  color: var(--fg);
+  box-shadow: var(--shadow-3);
+}
+
+dialog::backdrop {
+  background: rgb(0 0 0 / 0.5);
+  backdrop-filter: blur(2px);
+}
+
+dialog h2 {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-lg);
+}
+
+dialog p {
+  margin: 0 0 var(--space-3);
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
+dialog input {
+  width: 100%;
+  min-height: var(--control-h-lg);
+  font-size: var(--text-xl);
+  letter-spacing: 0.2em;
+  text-align: center;
+}
+
+dialog .actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+}
+
+/* ---------- 表單元件：圓角 --radius-sm、focus ring --focus-ring（offset 2px）、過場 --ease，全部一致 ---------- */
+
+input,
+select,
+button {
+  font: inherit;
+}
+
+input,
+select {
+  box-sizing: border-box;
+  min-height: var(--control-h);
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background-color: var(--field);
+  color: inherit;
+  transition:
+    border-color var(--ease),
+    background-color var(--ease);
+}
+
+/* 下拉：自畫向下箭頭（兩道漸層組成，不載入圖片），右側留出箭頭的位置。 */
+select {
+  appearance: none;
+  padding-right: 34px;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position:
+    calc(100% - 18px) 50%,
+    calc(100% - 13px) 50%;
+  background-size: 5px 5px;
+  background-repeat: no-repeat;
+  cursor: pointer;
+}
+
+option {
+  background-color: var(--raised);
+  color: var(--fg);
+}
+
+input:hover:not(:disabled),
+select:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--fg) 45%, var(--border-strong));
+}
+
+input:focus-visible,
+select:focus-visible {
+  border-color: var(--accent);
+  outline: var(--focus-ring);
+  outline-offset: 2px;
+}
+
+input[aria-invalid="true"],
+select[aria-invalid="true"] {
+  border-color: var(--error);
+}
+
+input::placeholder {
+  color: var(--muted);
+  opacity: 1;
+}
+
+/* 停用：不用 opacity 淡化（muted 文字會掉到 3:1 以下），改用專用色；仍 ≥ 3:1 可辨識，又明顯比一般文字弱。 */
+input:disabled,
+select:disabled {
+  background-color: var(--disabled-bg);
+  color: var(--disabled-fg);
+  cursor: not-allowed;
+}
+
+input:disabled::placeholder {
+  color: var(--disabled-fg);
+}
+
+/* 勾選框：自畫的圓角方框，勾選時填 --accent-solid、白色勾號由小放大。 */
+input[type="checkbox"] {
+  flex: none;
+  appearance: none;
+  display: inline-grid;
+  place-content: center;
+  width: 18px;
+  height: 18px;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  border: 1.5px solid var(--border-strong);
+  border-radius: 5px;
+  background-color: var(--field);
+  cursor: pointer;
+}
+
+input[type="checkbox"]::before {
+  content: "";
+  width: 10px;
+  height: 10px;
+  background: var(--on-accent);
+  clip-path: polygon(14% 44%, 0 65%, 50% 100%, 100% 16%, 80% 0%, 43% 62%);
+  transform: scale(0);
+  transition: transform var(--ease);
+}
+
+input[type="checkbox"]:checked {
+  border-color: var(--accent-solid);
+  background-color: var(--accent-solid);
+}
+
+input[type="checkbox"]:checked::before {
+  transform: scale(1);
+}
+
+input[type="checkbox"]:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+input[type="checkbox"]:checked:hover:not(:disabled) {
+  border-color: var(--accent-solid-hover);
+  background-color: var(--accent-solid-hover);
+}
+
+input[type="checkbox"]:disabled {
+  border-color: var(--disabled-fg);
+}
+
+input[type="checkbox"]:disabled:checked {
+  background-color: var(--disabled-fg);
+}
+
+/*
+ * 按鈕四種：primary（accent 實心、白字）、secondary（浮起的中性底＋細框）、ghost（無底無框的 accent 字，取代文字連結式的動作；
+ * 高 28px，可放進文字列與狀態列）、ghost danger（同 ghost、紅字，hover 淡紅底）。button.link 只留給句子裡的文字連結。
+ */
+button.primary,
+button.secondary,
+button.ghost {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1);
+  box-sizing: border-box;
+  min-height: var(--control-h);
+  padding: 0 var(--space-4);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color var(--ease),
+    border-color var(--ease),
+    color var(--ease),
+    box-shadow var(--ease),
+    transform var(--ease);
+}
+
+button.primary {
+  background: var(--accent-solid);
+  color: var(--on-accent);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.14),
+    var(--shadow-1);
+}
+
+button.primary:hover:not(:disabled) {
+  background: var(--accent-solid-hover);
+}
+
+button.secondary {
+  background: var(--raised);
+  border-color: var(--border);
+  color: var(--fg);
+  box-shadow: var(--shadow-1);
+}
+
+button.secondary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--fg) 6%, var(--raised));
+  border-color: color-mix(in srgb, var(--fg) 18%, transparent);
+}
+
+button.ghost {
+  min-height: 28px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--accent);
+  font-size: var(--text-sm);
+}
+
+button.ghost:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+button.ghost.danger:not(:disabled) {
+  color: var(--error);
+}
+
+button.ghost.danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--error) 12%, transparent);
+}
+
+/* 按下：往下 1px 回饋點擊（只動 transform）；reduced motion 下沒有過場，直接到位。 */
+button.primary:active:not(:disabled),
+button.secondary:active:not(:disabled),
+button.ghost:active:not(:disabled),
+details.menu > summary:active {
+  transform: translateY(1px);
+}
+
+/* 句子裡的文字連結（「詳見『設定 → 免責與安全』」、更換密碼時的「取消」）。 */
+button.link {
+  padding: 0 2px;
+  border: none;
+  border-radius: 3px;
+  background: none;
+  color: var(--accent);
+  font-size: var(--text-sm);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  text-underline-offset: 3px;
+  cursor: pointer;
+  transition: text-decoration-color var(--ease);
+}
+
+button.link:hover:not(:disabled) {
+  text-decoration-color: currentColor;
+}
+
+/* 全部可聚焦的元件同一種 focus ring。 */
+button:focus-visible,
+summary:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* 選擇器要蓋過各按鈕自己的文字色（nav、子分頁、帳號列、ghost、連結、選單）。 */
+button:disabled,
+nav button:disabled,
+.subtab:disabled,
+.account-item.account-add:disabled,
+button.ghost:disabled,
+button.link:disabled,
+.menu-item:disabled {
+  color: var(--disabled-fg);
+  cursor: not-allowed;
+}
+
+button.primary:disabled,
+button.secondary:disabled {
+  background: var(--disabled-bg);
+  border-color: transparent;
+  box-shadow: none;
+}
+
+/* ---------- 窄視窗 ---------- */
+
+/* 登入分頁上下堆疊：側欄改到頂部全寬，內容區在下；帳號、密碼退回上下排。 */
+@media (max-width: 760px) {
+  .login-layout {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .account-pane {
+    max-height: 40vh;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .login-credentials {
+    flex-direction: column;
+  }
+
+  .login-credentials > .login-field {
+    flex: none;
+  }
+}
+
+@media (max-width: 600px) {
+  main {
+    padding: var(--space-4);
+  }
+
+  .login-main {
+    padding: var(--space-4);
+  }
+
+  .setting-row.path-setting {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+  }
+
+  .setting-row.path-setting > .badge {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}

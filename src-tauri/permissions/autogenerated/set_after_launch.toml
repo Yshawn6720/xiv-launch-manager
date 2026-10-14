@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-after-launch"
+description = "Enables the set_after_launch command without any pre-configured scope."
+commands.allow = ["set_after_launch"]
+
+[[permission]]
+identifier = "deny-set-after-launch"
+description = "Denies the set_after_launch command without any pre-configured scope."
+commands.deny = ["set_after_launch"]

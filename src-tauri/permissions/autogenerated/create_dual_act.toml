@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-create-dual-act"
+description = "Enables the create_dual_act command without any pre-configured scope."
+commands.allow = ["create_dual_act"]
+
+[[permission]]
+identifier = "deny-create-dual-act"
+description = "Denies the create_dual_act command without any pre-configured scope."
+commands.deny = ["create_dual_act"]

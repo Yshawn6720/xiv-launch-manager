@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-save-act-settings"
+description = "Enables the save_act_settings command without any pre-configured scope."
+commands.allow = ["save_act_settings"]
+
+[[permission]]
+identifier = "deny-save-act-settings"
+description = "Denies the save_act_settings command without any pre-configured scope."
+commands.deny = ["save_act_settings"]

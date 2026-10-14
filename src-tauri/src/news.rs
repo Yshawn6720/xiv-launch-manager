@@ -1,0 +1,120 @@
+//! 兩服官方消息的共用部分（protocols §1.4.2、§2.7）：消息項目、連結白名單、以系統瀏覽器開啟。
+//! 抓取與解析各在 `global::news`（frontier headline JSON）與 `tw::news`（官網 HTML）。
+
+use std::time::Duration;
+
+use reqwest::Url;
+use serde::Serialize;
+use windows::Win32::UI::Shell::{SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, ShellExecuteExW};
+use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+use windows::core::{HSTRING, PCWSTR, w};
+
+use crate::error::{AppError, AppResult};
+use crate::region::Region;
+
+/// 側欄顯示的則數。
+pub const NEWS_LIMIT: usize = 5;
+/// 只是側欄顯示用，不值得久等（與伺服器狀態相同）；每次請求各自計時。
+pub const NEWS_TIMEOUT: Duration = Duration::from_secs(10);
+pub const NEWS_USER_AGENT: &str = concat!("xiv-launch-manager/", env!("CARGO_PKG_VERSION"));
+
+/// 一則消息；`url` 已通過該服的白名單。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NewsItem {
+    pub title: String,
+    /// `YYYY/MM/DD`（兩服顯示格式相同）。
+    pub date: String,
+    pub url: String,
+}
+
+/// 消息連結白名單（fail-closed）：scheme 是 `https`、host 完全等於 `hosts` 其中之一（不做子字串或後綴比對），
+/// 沒有帳號密碼，也沒有非預設 port。
+pub fn is_allowed(url: &Url, hosts: &[&str]) -> bool {
+    url.scheme() == "https"
+        && url.host_str().is_some_and(|h| hosts.contains(&h))
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none()
+}
+
+/// 各服允許開啟的主機。
+fn hosts(region: Region) -> &'static [&'static str] {
+    match region {
+        Region::Global => crate::global::NEWS_HOSTS,
+        Region::Tw => crate::tw::NEWS_HOSTS,
+    }
+}
+
+/// 開啟用：值必須本身就是 `region` 白名單內的絕對 `https` URL（不解析相對路徑、不升級 `http`）。
+fn allowed_url(region: Region, raw: &str) -> Option<Url> {
+    let url = Url::parse(raw).ok()?;
+    is_allowed(&url, hosts(region)).then_some(url)
+}
+
+/// 以系統預設瀏覽器開啟 `region` 的消息（`open_news` command）。不信任前端傳來的值：先以 [`allowed_url`] 再檢查
+/// 一次該服白名單，不符回 [`AppError::NewsLinkRejected`]、不開啟。以 `ShellExecuteExW`（verb `open`，與 ACT 相同）
+/// 交給 https 的預設處理程式，不經 shell。不用開資料夾的 `explorer.exe <URL>`：2026-10-14 本機（Windows 11
+/// build 26300）實測它會開出「文件」資料夾，不會開瀏覽器。
+pub fn open_news(region: Region, raw: &str) -> AppResult<()> {
+    let url = allowed_url(region, raw).ok_or(AppError::NewsLinkRejected { region })?;
+    let file = HSTRING::from(url.as_str());
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+        // NOASYNC：要求呼叫返回前完成啟動（呼叫端不保證有訊息迴圈）。
+        fMask: SEE_MASK_NOASYNC,
+        lpVerb: w!("open"),
+        lpFile: PCWSTR(file.as_ptr()),
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
+    };
+    // SAFETY: info 的字串指標指向本函式持有、以 0 結尾（HSTRING 保證）且呼叫期間存活的緩衝區；cbSize 已設定；
+    // 沒有 SEE_MASK_NOCLOSEPROCESS，不會回傳需要關閉的 handle。quality-allow: Win32 FFI，ShellExecuteExW 沒有安全包裝
+    unsafe { ShellExecuteExW(&mut info) }.map_err(|e| AppError::Io {
+        context: "開啟瀏覽器".into(),
+        message: e.message(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn open_accepts_only_absolute_https_on_that_regions_hosts() {
+        let tw = "https://www.ffxiv.com.tw/web/news/news_content.aspx?id=mP1BDEYZla";
+        let global = "https://eu.finalfantasyxiv.com/lodestone/news/detail/d136a3092faff585c1caf018cca5df1bce1792f4";
+        let cases: [(Region, &str, Option<&str>); 27] = [
+            (Region::Tw, tw, Some(tw)),
+            (Region::Tw, "HTTPS://WWW.FFXIV.COM.TW/web/news/", Some("https://www.ffxiv.com.tw/web/news/")),
+            (Region::Global, global, Some(global)),
+            (Region::Global, "https://jp.finalfantasyxiv.com/lodestone/", Some("https://jp.finalfantasyxiv.com/lodestone/")),
+            (Region::Global, "https://na.finalfantasyxiv.com/lodestone/", Some("https://na.finalfantasyxiv.com/lodestone/")),
+            (Region::Global, "https://de.finalfantasyxiv.com/lodestone/", Some("https://de.finalfantasyxiv.com/lodestone/")),
+            (Region::Global, "https://fr.finalfantasyxiv.com/lodestone/", Some("https://fr.finalfantasyxiv.com/lodestone/")),
+            // 另一服的主機不行。
+            (Region::Tw, global, None),
+            (Region::Global, tw, None),
+            (Region::Tw, "http://www.ffxiv.com.tw/web/news/news_content.aspx?id=x", None),
+            (Region::Tw, "/web/news/news_content.aspx?id=x", None),
+            (Region::Tw, "news_content.aspx?id=x", None),
+            (Region::Tw, "//www.ffxiv.com.tw/web/news/", None),
+            (Region::Tw, "javascript:alert(1)", None),
+            (Region::Tw, "https://evil.example/", None),
+            (Region::Tw, "https://www.ffxiv.com.tw.evil.com/", None),
+            (Region::Tw, "https://www.ffxiv.com.tw@evil.example/", None),
+            (Region::Tw, "https://user:pw@www.ffxiv.com.tw/", None),
+            (Region::Tw, "https://www.ffxiv.com.tw:8443/", None),
+            (Region::Tw, "https://ffxiv.com.tw/", None),
+            (Region::Tw, "file:///C:/Windows/System32/calc.exe", None),
+            (Region::Tw, "", None),
+            (Region::Global, "http://eu.finalfantasyxiv.com/lodestone/", None),
+            (Region::Global, "https://eu.finalfantasyxiv.com.evil.com/lodestone/", None),
+            (Region::Global, "https://finalfantasyxiv.com/lodestone/", None),
+            (Region::Global, "https://www.finalfantasyxiv.com/", None),
+            (Region::Global, "https://frontier.ffxiv.com/news/headline.json", None),
+        ];
+        for (region, raw, expected) in cases {
+            assert_eq!(allowed_url(region, raw).map(String::from).as_deref(), expected, "{region} {raw}");
+        }
+    }
+}

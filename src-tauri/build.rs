@@ -1,0 +1,54 @@
+// 宣告 app commands 後，每個 command 都要經 capability 授權：主視窗與 tw-recaptcha 視窗
+// 因此各自只拿到自己需要的 command（主 note「台服 reCAPTCHA」）。
+const COMMANDS: &[&str] = &[
+    "get_config",
+    "set_game_path",
+    "set_theme",
+    "set_after_launch",
+    "detect_game_path",
+    "detect_dalamud_data",
+    "get_server_status",
+    "open_folder",
+    "get_tw_news",
+    "get_global_news",
+    "open_news",
+    "save_account",
+    "set_account_profile",
+    "import_detected_profile",
+    "delete_account",
+    "save_profile",
+    "delete_profile",
+    "duplicate_profile",
+    "list_yanmucorp_releases",
+    "list_installed_dalamud",
+    "remove_installed_dalamud",
+    "install_dalamud",
+    "cancel_dalamud_download",
+    "app_update_target",
+    "install_app_update",
+    "get_license_text",
+    "launch_account",
+    "preview_otp",
+    "check_game_update",
+    "update_game",
+    "clear_patch_dirty",
+    "get_patch_state",
+    "check_game_integrity",
+    "get_act_settings",
+    "save_act_settings",
+    "list_act_choices",
+    "get_running_status",
+    "launch_act",
+    "get_act_link_status",
+    "get_act_plugin_versions",
+    "enable_act_link",
+    "create_dual_act",
+    "tw_recaptcha_event",
+];
+
+fn main() {
+    tauri_build::try_build(
+        tauri_build::Attributes::new().app_manifest(tauri_build::AppManifest::new().commands(COMMANDS)),
+    )
+    .unwrap_or_else(|e| panic!("tauri-build 失敗：{e}")); // quality-allow: build script 無法回傳錯誤，只能中止建置
+}

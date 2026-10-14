@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-tw-news"
+description = "Enables the get_tw_news command without any pre-configured scope."
+commands.allow = ["get_tw_news"]
+
+[[permission]]
+identifier = "deny-get-tw-news"
+description = "Denies the get_tw_news command without any pre-configured scope."
+commands.deny = ["get_tw_news"]

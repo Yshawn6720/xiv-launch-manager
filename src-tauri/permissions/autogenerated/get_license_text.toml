@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-license-text"
+description = "Enables the get_license_text command without any pre-configured scope."
+commands.allow = ["get_license_text"]
+
+[[permission]]
+identifier = "deny-get-license-text"
+description = "Denies the get_license_text command without any pre-configured scope."
+commands.deny = ["get_license_text"]

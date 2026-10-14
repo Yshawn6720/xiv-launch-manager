@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-install-dalamud"
+description = "Enables the install_dalamud command without any pre-configured scope."
+commands.allow = ["install_dalamud"]
+
+[[permission]]
+identifier = "deny-install-dalamud"
+description = "Denies the install_dalamud command without any pre-configured scope."
+commands.deny = ["install_dalamud"]

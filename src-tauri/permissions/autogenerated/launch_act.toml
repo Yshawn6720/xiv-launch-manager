@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-launch-act"
+description = "Enables the launch_act command without any pre-configured scope."
+commands.allow = ["launch_act"]
+
+[[permission]]
+identifier = "deny-launch-act"
+description = "Denies the launch_act command without any pre-configured scope."
+commands.deny = ["launch_act"]

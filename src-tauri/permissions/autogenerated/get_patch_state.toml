@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-patch-state"
+description = "Enables the get_patch_state command without any pre-configured scope."
+commands.allow = ["get_patch_state"]
+
+[[permission]]
+identifier = "deny-get-patch-state"
+description = "Denies the get_patch_state command without any pre-configured scope."
+commands.deny = ["get_patch_state"]

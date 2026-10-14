@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <title>XIV Launch Manager</title>
+    <script type="module" src="/src/main.ts"></script>
+  </head>
+  <body>
+    <header>
+      <h1>XIV Launch Manager</h1>
+      <nav aria-label="分頁">
+        <button data-tab="login" class="active" aria-current="page">登入</button>
+        <button data-tab="extensions">擴充功能</button>
+        <button data-tab="settings">設定</button>
+      </nav>
+      <div id="running-status" class="running-status" role="status" aria-label="執行狀態" hidden></div>
+      <div class="app-meta">
+        <span id="app-version-status" class="app-version-status" role="status"></span>
+        <button id="app-version" class="app-version" type="button" title="檢查更新" hidden></button>
+      </div>
+    </header>
+    <main>
+      <section id="tab-login"></section>
+      <section id="tab-extensions" hidden></section>
+      <section id="tab-settings" hidden></section>
+    </main>
+    <footer>
+      <div id="message" role="status" aria-live="polite"></div>
+    </footer>
+    <dialog id="otp-dialog">
+      <form method="dialog">
+        <h2 id="otp-dialog-title">登入</h2>
+        <p>輸入一次性密碼（OTP）後立即登入</p>
+        <input id="otp-input" inputmode="numeric" autocomplete="one-time-code" required autofocus />
+        <div class="actions">
+          <button class="primary" value="login">登入</button>
+          <button class="secondary" value="cancel" formnovalidate>取消</button>
+        </div>
+      </form>
+    </dialog>
+  </body>
+</html>

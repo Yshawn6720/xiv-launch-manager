@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-launch-account"
+description = "Enables the launch_account command without any pre-configured scope."
+commands.allow = ["launch_account"]
+
+[[permission]]
+identifier = "deny-launch-account"
+description = "Denies the launch_account command without any pre-configured scope."
+commands.deny = ["launch_account"]

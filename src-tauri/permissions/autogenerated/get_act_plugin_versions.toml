@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-act-plugin-versions"
+description = "Enables the get_act_plugin_versions command without any pre-configured scope."
+commands.allow = ["get_act_plugin_versions"]
+
+[[permission]]
+identifier = "deny-get-act-plugin-versions"
+description = "Denies the get_act_plugin_versions command without any pre-configured scope."
+commands.deny = ["get_act_plugin_versions"]

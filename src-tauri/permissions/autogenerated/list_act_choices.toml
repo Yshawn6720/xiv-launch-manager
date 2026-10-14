@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-list-act-choices"
+description = "Enables the list_act_choices command without any pre-configured scope."
+commands.allow = ["list_act_choices"]
+
+[[permission]]
+identifier = "deny-list-act-choices"
+description = "Denies the list_act_choices command without any pre-configured scope."
+commands.deny = ["list_act_choices"]
