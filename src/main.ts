@@ -157,8 +157,6 @@ let twVersions: string[] | null = null;
 let twVersionsLoad: Promise<string[]> | null = null;
 /** 最近一次讀取台服版本清單失敗的原因；不自動重試，版本下拉旁的「重試」可手動重試。 */
 let twVersionsError: string | null = null;
-/** 已下載的 Dalamud 本體；null＝讀取失敗（錯誤已顯示在訊息列）。 */
-let installed: InstalledVersion[] | null = null;
 /** 偵測到的舊啟動器 Dalamud 資料；null＝偵測失敗（錯誤已顯示在訊息列）。 */
 let detected: DetectedDalamudData[] | null = null;
 
@@ -1395,7 +1393,8 @@ function renderLogin(): void {
   // 只存設定、不登入（例如先改好密碼或 OTP 方式）。
   const save = h("button", { id: "login-save", class: "secondary", type: "button" }, "僅儲存");
 
-  const dalamudField = loginField("Dalamud 設定檔", dalamud, dalamudError);
+  // 在「Dalamud」小標題底下，標籤不再重複「Dalamud」。
+  const dalamudField = loginField("設定檔", dalamud, dalamudError);
   dalamudField.classList.add("login-dalamud");
 
   // 先依區服填好「Dalamud 設定檔」下拉，設定檔資訊與台服版本切換才找得到目前套用的設定。
@@ -1427,14 +1426,14 @@ function renderLogin(): void {
         h(
           "p",
           { class: "field-hint" },
-          "登入時讓 ACT 切到這個遊戲，並依「擴充功能 › ACT」的設定自動開啟 ACT。同一服同時開兩個帳號時，小號可取消勾選，免得把 ACT 從主號搶走。ACT 跟著的遊戲關掉時，會切回同一服還開著、有勾選的帳號中最晚開的那個（本程式要開著）。",
+          "登入時讓 ACT 切到這個遊戲，並依「擴充功能 › ACT」的設定自動開啟。同一服開兩個帳號時，小號可取消勾選，免得搶走主號的 ACT；ACT 跟著的遊戲關掉時，會切回同一服仍開著、有勾選的帳號中最晚開的那個（本程式要開著）。",
         ),
       ),
       h(
         "div",
         { class: "adv-section" },
         h("h3", { class: "adv-heading" }, "啟動參數"),
-        loginField("額外啟動參數（選填）", extraArgs, extraArgsError),
+        loginField("額外參數（選填）", extraArgs, extraArgsError),
       ),
     ),
   );
@@ -1543,13 +1542,25 @@ function renderLogin(): void {
         localStorage.setItem(LAST_ACCOUNT_KEY, id);
         launching = { accountId: id, region: d.region };
         const profileId = withoutDalamud ? null : target.profileId;
+        // 用後端最新的設定與佔用狀態：別的帳號可能剛開遊戲；新帳號沿用偵測到的舊資料時，設定檔是後端剛建立的。
+        const fresh = profileId ? await api.getConfig() : null;
+        const profile = fresh?.profiles.find((p) => p.id === profileId);
+        // 第一次共用正在使用的設定檔：先講明會互相覆蓋並建議複製（protocols §3），在下載前問，取消就不登入。
+        if (profile && !profile.shareConfirmed && fresh?.profilesInUse.includes(profile.id)) {
+          const ok = confirm(
+            `Dalamud 設定檔「${profile.name}」正被另一個遊戲使用。\n\n` +
+              "兩個遊戲共用同一個設定檔時，兩邊改的設定（含插件設定）會互相覆蓋：後存的蓋掉先存的。\n" +
+              "雙開建議改用複本：到「擴充功能 › Dalamud」按這個設定檔的「複製」，再讓這個帳號改用複本。\n\n" +
+              "仍要共用嗎？按「確定」直接登入，這個設定檔之後不再詢問。",
+          );
+          if (!ok) {
+            remember(id, "已取消", true);
+            return "已取消";
+          }
+          await api.saveProfile({ ...profile, shareConfirmed: true });
+        }
         // 先把 Dalamud 下載好再問 OTP、再登入：下載可能要好幾分鐘，OTP 會在下載期間過期。後端登入時沿用這次準備好的
         // 結果（同版本且本體重核通過），不再準備一次。
-        const profile = profileId
-          ? (config.profiles.find((p) => p.id === profileId) ??
-            // 新帳號沿用偵測到的舊資料時，設定檔是後端剛建立的，前端的 config 裡還沒有。
-            (await api.getConfig()).profiles.find((p) => p.id === profileId))
-          : undefined;
         if (profile) {
           say("準備 Dalamud…");
           await api.installDalamud(channelRegion(profile.channel), channelVersion(profile.channel));
@@ -1562,8 +1573,10 @@ function renderLogin(): void {
             remember(id, "已取消", true);
             return "已取消";
           }
-          say(`登入 ${label}…`);
         }
+        // 準備 Dalamud 只到這裡；之後的登入、啟動遊戲與注入（遊戲初始化慢時可能等數十秒）不能還顯示「準備 Dalamud…」，
+        // 訊息列回到「登入」，各階段顯示在登入面板的進度。
+        say(`登入 ${label}…`);
         const r = await api.launchAccount(id, code, typedPassword, withoutDalamud, plugins);
         // 狀態與訊息都用「・」接版本，避免和 Dalamud 標籤裡的括號疊在一起。
         const loaded = r.dalamudVersion
@@ -1650,7 +1663,7 @@ function twVersionField(p: Profile): HTMLElement[] {
     h(
       "div",
       { class: "login-field" },
-      ...field("Dalamud 版本", select),
+      ...field("版本", select),
       ...(sharing.length > 1 ? [h("p", { class: "field-hint" }, `切換版本會影響：${sharing.map(accountLabel).join("、")}`)] : []),
       error,
     ),
@@ -1784,7 +1797,7 @@ function ensureTwVersions(): Promise<string[]> {
 
 /** 某區服已下載的 Dalamud，新到舊（國際服為點分數字、台服為 yy-mm-dd-nn，都依數字排序）。 */
 function installedOf(region: Region): InstalledVersion[] {
-  return (installed ?? [])
+  return config.installed
     .filter((v) => isRegionInstall(v, region))
     .sort((x, y) => y.version.localeCompare(x.version, undefined, { numeric: true }));
 }
@@ -1809,7 +1822,7 @@ function dalamudVersionLabel(region: Region, dirVersion: string, dalamudVersion:
 }
 
 function findInstalled(region: Region, dirVersion: string): InstalledVersion | undefined {
-  return (installed ?? []).find((v) => isRegionInstall(v, region) && v.version === dirVersion);
+  return config.installed.find((v) => isRegionInstall(v, region) && v.version === dirVersion);
 }
 
 /** 台服 tag 的顯示：已下載的附上 Dalamud 版本，否則只有日期標籤。 */
@@ -1825,7 +1838,7 @@ function twTagLabel(tag: string): string {
 async function installedDalamudVersion(region: Region, dirVersion: string): Promise<string | null> {
   if (!findInstalled(region, dirVersion)) {
     // 讀取失敗只少了版本號；run() 結束重繪時會再讀一次並在訊息列顯示原因。
-    installed = await api.listInstalledDalamud().catch(() => installed);
+    config.installed = await api.listInstalledDalamud().catch(() => config.installed);
   }
   return findInstalled(region, dirVersion)?.dalamudVersion ?? null;
 }
@@ -1917,7 +1930,7 @@ function duplicateProfile(p: Profile): void {
       // 在 run() 重繪之前清掉，重建的卡片就回到一般狀態。
       duplicating = null;
     }
-  }).then(() => document.getElementById(`profile-more-${created}`)?.focus());
+  }).then(() => document.getElementById(`profile-copy-${created}`)?.focus());
 }
 
 /** 「擴充功能 › Dalamud」正在編輯的設定檔卡片；同時只有一張。欄位值存這裡，重繪沿用。 */
@@ -2016,6 +2029,7 @@ function profileEditor(d: ProfileDraft, p: Profile | null): HTMLFormElement {
         channel: regionChannel(d.region, d.tag ? { kind: "pinned", tag: d.tag } : { kind: "latest" }),
         injectionDelayMs: Math.max(0, Number(d.delay) || 0),
         dataDir: p?.dataDir ?? null,
+        shareConfirmed: p?.shareConfirmed ?? false,
       });
       // 存好才收起；失敗時留在編輯中，草稿沿用。
       if (profileDraft === d) profileDraft = null;
@@ -2140,17 +2154,27 @@ function choiceCard(c: DalamudChoice): HTMLElement {
   const openDir = h("button", { class: "secondary", type: "button", title: c.path }, "開啟資料夾");
   openDir.addEventListener("click", () => openFolder(p ? { kind: "profile", id: p.id } : { kind: "detected", path: c.path }));
   const running = p !== null && config.profilesInUse.includes(p.id);
+  const actions: HTMLElement[] = [openDir];
+  if (p) {
+    // 雙開同服帳號要靠複本，放在卡片上而非「更多」裡。遊戲執行中衛月會持續寫入設定，後端也會拒絕。
+    const copy = h(
+      "button",
+      {
+        id: `profile-copy-${p.id}`,
+        class: "secondary",
+        type: "button",
+        title: running ? "遊戲執行中，請先關閉遊戲再複製" : "複製設定與插件；插件資料與快取不複製，插件首次執行時會重建",
+      },
+      "複製",
+    );
+    copy.disabled = running;
+    copy.addEventListener("click", () => duplicateProfile(p));
+    actions.push(copy);
+  }
   const items: MenuItem[] = p
     ? [
         { label: "開啟 log", action: () => openFolder({ kind: "profileLogs", id: p.id }) },
         { label: "編輯", action: () => editProfile(c.region, p) },
-        // 遊戲執行中衛月會持續寫入設定，後端也會拒絕。
-        {
-          label: "複製",
-          action: () => duplicateProfile(p),
-          disabled: running,
-          title: running ? "遊戲執行中，請先關閉遊戲再複製" : "複製設定與插件；插件資料與快取不複製，插件首次執行時會重建",
-        },
         // 只移除本程式的設定項；沿用的舊資料夾不會被刪。
         { label: "刪除", action: () => deleteProfile(p), danger: true },
       ]
@@ -2158,7 +2182,7 @@ function choiceCard(c: DalamudChoice): HTMLElement {
         { label: "開啟 log", action: () => undefined, disabled: true, title: "尚未使用過，沒有 log" },
         { label: "編輯", action: () => void editDetected(c) },
       ];
-  card.append(h("div", { class: "card-actions" }, openDir, moreMenu(`profile-more-${key}`, [items])));
+  card.append(h("div", { class: "card-actions" }, ...actions, moreMenu(`profile-more-${key}`, [items])));
   if (p && duplicating?.id === p.id) {
     duplicateProgress = progressView(`複製「${p.name}」進度`, false);
     paintProgress(duplicateProgress, duplicating.progress ?? { text: "準備複製…", done: 0, total: null, cancellable: false });
@@ -2368,20 +2392,16 @@ function versionBlock(region: Region): HTMLElement {
     block.append(error);
   } else {
     target = list[0];
-    const status =
-      installed === null
-        ? "無法讀取已下載的版本，原因見下方訊息列。"
-        : target
-          ? dalamudVersionLabel(region, target.version, target.dalamudVersion)
-          : "尚未下載";
+    const status = target ? dalamudVersionLabel(region, target.version, target.dalamudVersion) : "尚未下載";
     bar.append(h("span", { class: "install-status" }, status));
   }
 
   const latest = region === "global" || tag === "";
   const downloaded = latest ? list.length > 0 : target !== undefined;
+  // 主要按鈕只留給「下載」：已下載時「檢查更新」是例行動作，用次要樣式。
   const button = h(
     "button",
-    { id: "dalamud-install", class: "primary", type: "button" },
+    { id: "dalamud-install", class: downloaded ? "secondary" : "primary", type: "button" },
     job ? "下載中…" : !downloaded ? "下載" : latest ? "檢查更新" : "已下載",
   );
   // 下載前要依遊戲版本檢查相容性，沒有遊戲路徑就無法下載。
@@ -2736,7 +2756,7 @@ function saveActPath(region: Region, s: ActConfig[Region], path: string | null, 
   }).then(() => document.getElementById(focusId)?.focus());
 }
 
-/** 一個區服的面板：「ACT」（下拉選擇、狀態與「立即開啟 ACT」、FFXIV 插件版本、登入後自動開啟）與「連動」（這個 ACT 是否已啟用連動）。 */
+/** 一個區服的面板「ACT」：下拉選擇、狀態與「立即開啟 ACT」、FFXIV 插件版本、這個 ACT 的連動狀態、登入後自動開啟。 */
 function actRegionPanel(region: Region, s: ActConfig[Region]): HTMLElement[] {
   const label = regionLabel(region);
   const choices = actChoices ?? [];
@@ -2830,6 +2850,7 @@ function actRegionPanel(region: Region, s: ActConfig[Region]): HTMLElement[] {
       h("div", { class: "act-choice" }, select, chosen, custom),
       h("div", { class: "act-status-bar" }, text, start, recheck),
       h("div", { class: "act-status-bar" }, pluginText, pluginRecheck),
+      ...actLinkRows(region),
       h("label", { class: "check" }, auto, `登入${label}遊戲後自動開啟 ACT`),
       h(
         "p",
@@ -2838,12 +2859,6 @@ function actRegionPanel(region: Region, s: ActConfig[Region]): HTMLElement[] {
           ? `先選擇${label}要用的 ACT。`
           : "只對勾了「ACT 跟這個帳號」的帳號有效（設定在登入頁「進階」）。已在執行就不再開；ACT 要求系統管理員時，Windows 會先詢問是否允許。",
       ),
-    ),
-    h(
-      "section",
-      { class: "act-block", "aria-labelledby": "act-link-title" },
-      h("h3", { class: "subsection-title", id: "act-link-title" }, "連動"),
-      ...actLinkRows(region),
     ),
   ];
 }
@@ -2857,7 +2872,7 @@ const ACT_LINK_TEXT: Record<ActLinkState, string> = {
   registered: "已啟用連動",
 };
 
-/** 「連動」：這一服選的 ACT 是否已啟用連動；兩服選同一個 ACT 時註明單開。 */
+/** 這一服選的 ACT 的連動狀態（ACT 卡片裡一行）；兩服選同一個 ACT 時註明單開。 */
 function actLinkRows(region: Region): HTMLElement[] {
   const link = actLink;
   if (link === null) return [h("p", { class: "hint" }, "無法讀取連動狀態，原因見下方訊息列。")];
@@ -2888,8 +2903,9 @@ function actChangeText(changes: ActChange[]): string {
 }
 
 /**
- * 子分頁下方的共用設定「ACT 連動與雙開」：一鍵讓各 ACT 自動切到剛開的遊戲，以及一鍵建立另一服用的 ACT。
- * 兩服共用、與區服子分頁同一層：用頁面層級的標題，上方以分隔線和子分頁面板的「ACT」「連動」隔開。
+ * 區服卡片下方的共用設定「ACT 連動與雙開」：一鍵讓各 ACT 自動切到剛開的遊戲，以及一鍵建立另一服用的 ACT。
+ * 兩服共用、與區服子分頁同一層：用頁面層級的標題。外掛如何運作收在「運作方式」裡，平常不佔版面；
+ * 所有 ACT 都已啟用連動時，「啟用 ACT 連動」退成次要按鈕（仍可按，新加的 ACT 要再登記一次）。
  */
 function actSharedBlock(): HTMLElement {
   const link = actLink;
@@ -2900,8 +2916,13 @@ function actSharedBlock(): HTMLElement {
       : instances.map((i) => `已建立${regionLabel(i.region)}用的 ACT${i.inUse ? "" : "（目前沒有選用）"}`).join("；") +
         "。";
   const noAct = link === null || link.acts.length === 0;
+  const allLinked = !noAct && link.acts.every((a) => a.state === "registered");
 
-  const enable = h("button", { id: "act-link-enable", class: "primary", type: "button" }, "啟用 ACT 連動");
+  const enable = h(
+    "button",
+    { id: "act-link-enable", class: allLinked ? "secondary" : "primary", type: "button" },
+    "啟用 ACT 連動",
+  );
   enable.disabled = noAct;
   enable.addEventListener("click", () => {
     void run("啟用 ACT 連動", async () => actChangeText(await api.enableActLink())).then(() =>
@@ -2931,17 +2952,26 @@ function actSharedBlock(): HTMLElement {
       { class: "hint" },
       "啟用連動後，勾了「ACT 跟這個帳號」的帳號登入時，ACT 會自動切到剛開的遊戲；雙開會以原本的 ACT 為底，複製一份給另一服用，建好後自動選上。",
     ),
-    h(
-      "p",
-      { class: "hint" },
-      "連動靠本程式附的 ACT 外掛 XlmActBridge.cs：登入後它把 FFXIV 插件的「FFXIV Process ID」選到剛開的遊戲，並依這個 ACT 的 Region 只跟國際服或繁中服其中一邊。Region 由各 ACT 自己固定（雙開時會自動設好），外掛不會改 Region。",
-    ),
     h("p", { class: "hint" }, `雙開：${dualText}`),
     h("div", { class: "act-link-actions" }, enable, dual),
     h(
       "p",
       { class: actOpen ? "field-hint act-link-warn" : "field-hint" },
       `${actOpen ? "ACT 正在執行：" : ""}設定前請先關閉所有 ACT（ACT 關閉時會把設定蓋回去）；雙開前請先在原本 ACT 的 FFXIV 插件選好 Region。`,
+    ),
+    h(
+      "details",
+      { class: "editor-advanced act-link-how" },
+      h("summary", {}, "運作方式"),
+      h(
+        "div",
+        { class: "editor-advanced-body" },
+        h(
+          "p",
+          { class: "hint" },
+          "連動靠本程式附的 ACT 外掛 XlmActBridge.cs：登入後它把 FFXIV 插件的「FFXIV Process ID」選到剛開的遊戲，並依這個 ACT 的 Region 只跟國際服或繁中服其中一邊。Region 由各 ACT 自己固定（雙開時會自動設好），外掛不會改 Region。",
+        ),
+      ),
     ),
   );
 }
@@ -3753,14 +3783,23 @@ function uiBlock(): HTMLElement {
 function renderSettings(): void {
   const root = section("settings");
   const rows = REGIONS.map((region) => {
-    const input = h("input", { value: config.games[region] ?? "", "aria-label": `${regionLabel(region)}遊戲路徑` });
+    const saved = config.games[region] ?? "";
+    const input = h("input", { value: saved, "aria-label": `${regionLabel(region)}遊戲路徑` });
+    // 「儲存」只在路徑和已存的不同時可按：兩服各一顆常亮的主要按鈕會搶走注意力。
+    const save = h("button", { class: "primary" }, "儲存");
+    const syncSave = () => {
+      save.disabled = input.value.trim() === saved;
+    };
+    syncSave();
+    input.addEventListener("input", syncSave);
     const detect = h("button", { class: "secondary" }, "自動偵測");
     detect.addEventListener("click", async () => {
       const found = await api.detectGamePath(region);
-      if (found) input.value = found;
-      else say(`找不到${regionLabel(region)}安裝位置，請手動輸入`, "error");
+      if (found) {
+        input.value = found;
+        syncSave();
+      } else say(`找不到${regionLabel(region)}安裝位置，請手動輸入`, "error");
     });
-    const save = h("button", { class: "primary" }, "儲存");
     save.addEventListener("click", () =>
       run(`儲存${regionLabel(region)}路徑`, () => api.setGamePath(region, input.value.trim() || null)),
     );
@@ -3806,15 +3845,8 @@ function renderSettings(): void {
 let currentTab = "login";
 
 async function render(): Promise<void> {
-  // 與設定並行偵測舊資料、列出已下載的 Dalamud、讀 ACT 設定與 ACT 連動狀態；失敗只顯示訊息，不擋其他繪製。
+  // 與設定並行偵測舊資料、讀更新狀態、ACT 設定與 ACT 連動狀態（已下載的 Dalamud 隨設定一起回傳）；失敗只顯示訊息，不擋其他繪製。
   const detecting = api.detectDalamudData().then(
-    (list) => list,
-    (e: unknown) => {
-      say(errorText(e), "error");
-      return null;
-    },
-  );
-  const listing = api.listInstalledDalamud().then(
     (list) => list,
     (e: unknown) => {
       say(errorText(e), "error");
@@ -3857,7 +3889,6 @@ async function render(): Promise<void> {
   }
   applyTheme(config.ui.theme);
   detected = await detecting;
-  installed = await listing;
   patchState = await patching;
   actSettings = await acting;
   actLink = await linking;

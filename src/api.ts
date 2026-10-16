@@ -17,6 +17,8 @@ export interface Profile {
   injectionDelayMs: number;
   /** 沿用的舊啟動器 Dalamud 資料夾；null＝本程式管理的 profiles/<id>/。 */
   dataDir: string | null;
+  /** 已確認可與執行中的遊戲共用；確認後同時使用不再詢問（protocols §3）。 */
+  shareConfirmed: boolean;
 }
 
 export interface DetectedDalamudData {
@@ -69,6 +71,8 @@ export interface ConfigView {
   profilesInUse: string[];
   dataDir: string;
   profileInfo: ProfileInfo[];
+  /** 已下載的 Dalamud 本體（與 `list_installed_dalamud` 同一份）。 */
+  installed: InstalledVersion[];
   /** 遊戲仍在執行中的帳號 id。 */
   accountsRunning: string[];
   ui: UiSettings;

@@ -531,7 +531,7 @@ button.primary.app-update-go {
   font-size: var(--text-xs);
 }
 
-/* ---------- 區塊卡片：「擴充功能」的版本／設定檔／ACT／連動／ACT 連動與雙開，「設定」的遊戲路徑／資料位置／介面／免責與安全 ---------- */
+/* ---------- 區塊卡片：「擴充功能」的版本／設定檔／ACT／ACT 連動與雙開，「設定」的遊戲路徑／資料位置／介面／免責與安全 ---------- */
 
 .dalamud-block,
 .act-block,
@@ -545,7 +545,7 @@ button.primary.app-update-go {
   box-shadow: var(--shadow-1);
 }
 
-/* 卡片標題：「擴充功能」區服面板內的小標題（版本、設定檔、ACT、連動）與頁面層級的標題同一種樣式，都是卡片的標題列。 */
+/* 卡片標題：「擴充功能」區服面板內的小標題（版本、設定檔、ACT）與頁面層級的標題同一種樣式，都是卡片的標題列。 */
 .section-title,
 .subsection-title {
   margin: 0;
@@ -576,17 +576,27 @@ button.primary.app-update-go {
   margin-bottom: 0;
 }
 
-/* ---------- 巢狀卡片：「設定檔」區的設定檔（與就地展開的編輯表單）；在區塊卡片裡只畫外框（底色同卡片）、不加陰影 ---------- */
+/* ---------- 清單列：「設定檔」區的設定檔；在區塊卡片裡不再畫框，列與列之間一條細線（就地展開的編輯表單另畫 accent 框） ---------- */
 
 .card {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-3) var(--space-4);
-  margin-bottom: var(--space-3);
-  padding: var(--space-4);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
+  padding: var(--space-3) 0;
+}
+
+.card + .card {
+  border-top: 1px solid var(--border);
+}
+
+/* 標題列已有分隔線，第一列不再留上內距。 */
+:is(.section-title, .subsection-title) + .card {
+  padding-top: 0;
+}
+
+.card + .toolbar {
+  margin-top: var(--space-2);
 }
 
 .card-main {
@@ -1114,11 +1124,11 @@ main > #tab-login {
 }
 
 /*
- * 官方消息面板：接在帳號清單之後，跟著登入面板目前的區服（.global／.tw 決定 --region）。整塊是區服色淡淡著色的底（混入 --sidebar：
- * 淺色 8%、深色 10%）＋左緣 3px 區服色細條，標題（CSS 畫的報紙圖示＋「國際服消息」／「繁中服消息」）用區服色。每則是一塊小底
- * （面板上再疊 6% 區服色，則與則之間留 4px 縫，讓每條分得開）：標題 --fg、最多兩行、超出省略（完整標題在 title），日期小字 muted；
- * hover 改疊 10%。文字對比（標題、日期、說明小字對底色與 hover 底色）
- * 在深淺兩種主題都 ≥ 4.5:1，改色或改百分比要重算。側欄本身會捲動（.account-pane overflow-y），這一段不縮，帳號多時整欄一起捲動。
+ * 官方消息：接在帳號清單之後，跟著登入面板目前的區服（.global／.tw 決定 --region）。與帳號分組同一套版式：上方一條分隔線，
+ * 標題列（CSS 畫的報紙圖示＋「國際服消息」／「繁中服消息」）同分組標題（小字、字距加寬），只有圖示與文字用區服色；每則不加底色，
+ * 以細分隔線分開，hover 用側欄同一個 --sidebar-hover。標題 --fg、最多兩行、超出省略（完整標題在 title），日期小字 muted。
+ * 文字都是 --fg／--muted 疊在 --sidebar／--sidebar-hover 上，與帳號列同一組對比；區服色標題在兩種主題都 ≥ 4.5:1（同 badge 字色）。
+ * 側欄本身會捲動（.account-pane overflow-y），這一段不縮，帳號多時整欄一起捲動。
  */
 .news-group {
   flex: none;
@@ -1126,13 +1136,8 @@ main > #tab-login {
   flex-direction: column;
   gap: 2px;
   margin-top: var(--space-5);
-  padding: var(--space-1) var(--space-1) var(--space-2) calc(3px + var(--space-1));
-  border-radius: var(--radius-sm);
-  background: light-dark(
-    color-mix(in srgb, var(--region) 8%, var(--sidebar)),
-    color-mix(in srgb, var(--region) 10%, var(--sidebar))
-  );
-  box-shadow: inset 3px 0 0 var(--region);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border);
 }
 
 .news-title {
@@ -1141,7 +1146,7 @@ main > #tab-login {
   gap: var(--space-2);
   min-height: 28px;
   margin: 0;
-  padding: 0 var(--space-2);
+  padding: 0 var(--space-2) 0 var(--space-3);
   color: var(--region);
   font-size: var(--text-xs);
   font-weight: 700;
@@ -1166,10 +1171,14 @@ main > #tab-login {
 .news-list {
   display: flex;
   flex-direction: column;
-  gap: 4px;
   margin: 0;
   padding: 0;
   list-style: none;
+}
+
+/* 則與則之間一條細線，取代每則各自的底色。 */
+.news-list > li + li {
+  border-top: 1px solid var(--border);
 }
 
 .news-item {
@@ -1178,10 +1187,10 @@ main > #tab-login {
   gap: 2px;
   width: 100%;
   min-width: 0;
-  padding: 6px var(--space-2);
+  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
   border: none;
   border-radius: var(--radius-xs);
-  background: color-mix(in srgb, var(--region) 6%, transparent);
+  background: none;
   color: var(--fg);
   font-size: var(--text-sm);
   line-height: 1.45;
@@ -1191,7 +1200,7 @@ main > #tab-login {
 }
 
 .news-item:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--region) 10%, transparent);
+  background: var(--sidebar-hover);
 }
 
 .news-item-title {
@@ -1212,7 +1221,7 @@ main > #tab-login {
 /* 載入中、取不到（可點擊重試）、沒有消息：一行 muted 小字，左緣與標題對齊。 */
 .news-note {
   margin: 0;
-  padding: 0 var(--space-2);
+  padding: 0 var(--space-2) 0 var(--space-3);
   color: var(--muted);
   font-size: var(--text-xs);
   line-height: 1.6;
@@ -2108,7 +2117,10 @@ details.menu.menu-icon[open] > summary {
   flex-direction: column;
   align-items: stretch;
   gap: var(--space-4);
-  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  margin: var(--space-2) 0;
+  padding: var(--space-4);
+  border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
+  border-radius: var(--radius);
 }
 
 .profile-editor .login-field {
@@ -2232,9 +2244,9 @@ details.menu.menu-icon[open] > summary {
   margin-bottom: var(--space-2);
 }
 
-/* 「連動」：這一服 ACT 的連動狀態一行。 */
+/* ACT 卡片裡的連動狀態一行：與上方狀態列同間距。 */
 .act-link-state {
-  margin: 0 0 var(--space-2);
+  margin: 0 0 var(--space-3);
   font-weight: 600;
 }
 
@@ -2260,21 +2272,33 @@ details.menu.menu-icon[open] > summary {
   color: var(--error);
 }
 
+/* 「ACT 連動與雙開」底部的「運作方式」：與上方提醒隔開。 */
+.act-link-how {
+  margin-top: var(--space-3);
+}
+
 /* ---------- 設定分頁 ---------- */
 
-/* 區塊卡片裡的設定列：只畫外框的列（遊戲路徑每服一列、資料位置一列、介面每個選項一列）。 */
+/* 區塊卡片裡的設定列：不畫框，列與列之間一條細線（遊戲路徑每服一列、資料位置一列、介面每個選項一列）。 */
 .setting-row {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-3) var(--space-4);
-  padding: var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  padding: var(--space-3) 0;
 }
 
 .setting-row + .setting-row {
-  margin-top: var(--space-2);
+  border-top: 1px solid var(--border);
+}
+
+/* 標題列已有分隔線，第一列不再留上內距；最後一列由卡片內距收尾。 */
+:is(.section-title, .hint) + .setting-row {
+  padding-top: 0;
+}
+
+.setting-row:last-child {
+  padding-bottom: 0;
 }
 
 /* 固定 badge 欄寬，國際服／台服的輸入框左右緣對齊。 */
@@ -2304,6 +2328,11 @@ details.menu.menu-icon[open] > summary {
 
 .choice-setting > .choice-label {
   font-weight: 600;
+}
+
+/* segmented 照選項寬度，不被下方說明小字撐寬；兩列寬度才一致。 */
+.choice-setting > .segmented {
+  justify-self: start;
 }
 
 .choice-setting > .field-hint {

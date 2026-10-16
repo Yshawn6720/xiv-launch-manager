@@ -331,7 +331,8 @@ pub async fn launch_account(
             if profile.region() != region {
                 return Err(AppError::ProfileRegionMismatch);
             }
-            if dalamud::profile_in_use(paths, &profile.id)? {
+            // 共用前要先確認（protocols §3）；前端在登入前已問過，這裡再核對一次。
+            if !profile.share_confirmed && dalamud::profile_in_use(paths, &profile.id)? {
                 return Err(AppError::ProfileInUse {
                     profile: profile.name.clone(),
                 });
@@ -729,8 +730,9 @@ mod tests {
         (child, game)
     }
 
-    fn profile_records(paths: &AppPaths) -> std::collections::BTreeMap<String, GameProcess> {
-        serde_json::from_slice(&std::fs::read(paths.running_file()).expect("running.json")).expect("parse")
+    fn profile_records(paths: &AppPaths) -> std::collections::BTreeMap<String, Vec<GameProcess>> {
+        serde_json::from_slice(&std::fs::read(paths.profiles_running_file()).expect("profiles_running.json"))
+            .expect("parse")
     }
 
     /// 回傳成功之後遊戲才結束：撤銷這次的佔用與帳號執行紀錄（別的程序的不動），並以同步回錯時的錯誤通知。
@@ -779,7 +781,7 @@ mod tests {
         };
         watch.finish(&paths, |_, e| panic!("不應通知：{e}")).await;
 
-        assert_eq!(profile_records(&paths).get("p1"), Some(&game));
+        assert_eq!(profile_records(&paths)["p1"], [game]);
         assert_eq!(dalamud::running_accounts(&paths).expect("accounts"), ["a1"]);
         child.kill().expect("kill");
         child.wait().expect("reap");

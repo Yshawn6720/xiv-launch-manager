@@ -67,6 +67,8 @@ pub struct ConfigView {
     pub profiles: Vec<Profile>,
     pub profiles_in_use: Vec<String>,
     pub profile_info: Vec<ProfileInfo>,
+    /// 已下載的 Dalamud 本體；算 `profile_info` 時已讀過，一併回傳，前端重繪不必再列一次。
+    pub installed: Vec<InstalledVersion>,
     pub accounts_running: Vec<String>,
     pub data_dir: String,
     pub ui: UiSettings,
@@ -102,6 +104,7 @@ pub async fn get_config(state: State<'_, AppState>) -> AppResult<ConfigView> {
         profiles: config.profiles,
         profiles_in_use,
         profile_info,
+        installed,
         accounts_running: dalamud::running_accounts(&state.paths)?,
         data_dir: state.paths.root().display().to_string(),
         ui: config.ui,
@@ -161,14 +164,15 @@ pub async fn set_after_launch(state: State<'_, AppState>, after_launch: AfterLau
     .await
 }
 
+// 同步 command 在 main thread 執行、期間視窗不回應；讀 registry／磁碟的查詢（這兩個與 list_installed_dalamud、get_patch_state）宣告為 async。
 #[tauri::command]
-pub fn detect_game_path(region: Region) -> Option<String> {
+pub async fn detect_game_path(region: Region) -> Option<String> {
     crate::game::detect_install(region).map(|p| p.display().to_string())
 }
 
 /// 偵測舊啟動器留下、可直接沿用的衛月資料夾。
 #[tauri::command]
-pub fn detect_dalamud_data() -> Vec<DetectedDalamudData> {
+pub async fn detect_dalamud_data() -> Vec<DetectedDalamudData> {
     dalamud::detect_from_env()
 }
 
@@ -437,6 +441,7 @@ fn profile_from_detected(id: String, d: &DetectedDalamudData) -> Profile {
         channel,
         injection_delay_ms: d.region.default_injection_delay_ms(),
         data_dir: Some(d.path.clone()),
+        share_confirmed: false,
     }
 }
 
@@ -616,7 +621,7 @@ fn check_data_dir(
         .iter()
         .find(|p| p.id != profile.id && p.data_dir.as_ref() == Some(dir))
     {
-        return Err(AppError::ProfileInUse {
+        return Err(AppError::DataDirTaken {
             profile: other.name.clone(),
         });
     }
@@ -628,9 +633,7 @@ fn check_data_dir(
 pub async fn delete_profile(state: State<'_, AppState>, id: String) -> AppResult<()> {
     update_config(&state, |c| {
         if c.accounts.iter().any(|a| a.profile_id.as_deref() == Some(id.as_str())) {
-            return Err(AppError::ProfileInUse {
-                profile: "仍有帳號綁定此設定檔".into(),
-            });
+            return Err(AppError::ProfileHasAccounts);
         }
         c.profiles.retain(|p| p.id != id);
         Ok(())
@@ -677,6 +680,8 @@ fn add_duplicate(
         id: new_id,
         name: unique_profile_name(&config.profiles, &base),
         data_dir: None,
+        // 複本是新的一份資料，不沿用來源的共用確認（protocols §3）。
+        share_confirmed: false,
         ..source.clone()
     };
     let created = profile.name.clone();
@@ -744,7 +749,7 @@ pub async fn list_yanmucorp_releases() -> AppResult<Vec<ReleaseInfo>> {
 }
 
 #[tauri::command]
-pub fn list_installed_dalamud(state: State<'_, AppState>) -> AppResult<Vec<InstalledVersion>> {
+pub async fn list_installed_dalamud(state: State<'_, AppState>) -> AppResult<Vec<InstalledVersion>> {
     dalamud::list_installed(&state.paths)
 }
 
@@ -923,7 +928,7 @@ pub async fn clear_patch_dirty(state: State<'_, AppState>, region: Region) -> Ap
 
 /// 各區服的 dirty 標記與 pending 摘要。
 #[tauri::command]
-pub fn get_patch_state(state: State<'_, AppState>) -> AppResult<PatchState> {
+pub async fn get_patch_state(state: State<'_, AppState>) -> AppResult<PatchState> {
     game_update::patch_state(&state.paths, &state.pending_updates)
 }
 
@@ -1104,6 +1109,7 @@ mod tests {
             channel,
             injection_delay_ms: 0,
             data_dir: data_dir.map(PathBuf::from),
+            share_confirmed: false,
         }
     }
 
@@ -1318,7 +1324,7 @@ mod tests {
         ));
         assert!(matches!(
             check_data_dir(&existing, &profile("p", tw.clone(), Some(r"C:\a\TC")), &detected),
-            Err(AppError::ProfileInUse { profile }) if profile == "name-other"
+            Err(AppError::DataDirTaken { profile }) if profile == "name-other"
         ));
         // 自己重新存檔不算重複。
         assert!(check_data_dir(&existing, &existing[0], &detected).is_ok());
@@ -1553,6 +1559,7 @@ mod tests {
         };
         let mut source = profile("src", tw, None);
         source.injection_delay_ms = 1500;
+        source.share_confirmed = true;
         let config = Config {
             accounts: vec![account("a", Region::Tw, Some("src"))],
             profiles: vec![source.clone()],
@@ -1597,6 +1604,7 @@ mod tests {
         assert_eq!(copy.channel, source.channel);
         assert_eq!(copy.injection_delay_ms, 1500);
         assert_eq!(copy.data_dir, None);
+        assert!(!copy.share_confirmed, "複本不沿用來源的共用確認");
         assert_eq!(saved.accounts[0].profile_id.as_deref(), Some("src"));
 
         let dest = paths.profile_dir(&first.id);

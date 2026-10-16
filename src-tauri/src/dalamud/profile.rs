@@ -1,8 +1,8 @@
 //! 衛月 profile 目錄與佔用紀錄（主 note「衛月：來源 × 版本 × Profile」「程序與狀態」、protocols §3）。
 //!
-//! 佔用紀錄 `state/running.json`：profile_id → `{pid, created}`；`state/accounts_running.json`：
-//! account_id → 同格式（帶不帶衛月都記），兩份共用同一套讀寫與剔除邏輯。pid 會被系統重用，所以判斷
-//! 「仍在執行」時 pid 與程序建立時間都要相符；任何查找都只用本程式取得的 pid，不按程序名。
+//! 佔用紀錄 `state/profiles_running.json`：profile_id → `[{pid, created}, …]`（共用時多筆，protocols §3）；
+//! `state/accounts_running.json`：account_id → `{pid, created}`（帶不帶衛月都記）。pid 會被系統重用，所以判斷
+//! 「仍在執行」時 pid 與程序建立時間都要相符；任何查找都只用本程式取得的 pid，不按程序名。寫入時順便清掉已結束者。
 //! 讀改寫在本模組的鎖內完成：登入在 app-wide mutex 內記錄，背景觀察到遊戲提早結束時在 mutex 外撤銷
 //! （[`unmark_running`]、[`unmark_account_running`]），兩者不會互相蓋掉。
 
@@ -416,19 +416,21 @@ pub fn terminate(pid: u32) -> AppResult<()> {
 }
 
 type RunningMap = BTreeMap<String, GameProcess>;
+/// profile_id → 使用中的遊戲程序；共用時多筆。
+type ProfileUsers = BTreeMap<String, Vec<GameProcess>>;
 
-/// 兩份紀錄的讀改寫鎖（見模組說明）；臨界區只有讀檔、改 map、寫檔。
+/// 兩份紀錄的讀改寫鎖（見模組說明）；臨界區只有讀檔、改 map、寫檔，沒有會留下半更新狀態的 panic 點（寫檔是
+/// 暫存檔＋rename），poison 後可直接沿用。
 static RECORDS: Mutex<()> = Mutex::new(());
 
-/// 檔案不存在＝沒有紀錄；格式錯誤回報錯誤而不是當成空的，避免同一 profile 被重複使用。
-fn read_records(file: &Path) -> AppResult<RunningMap> {
-    let name = file.file_name().unwrap_or_default().to_string_lossy();
+/// 檔案不存在＝沒有紀錄；格式錯誤回報錯誤而不是當成空的，避免把使用中的 profile 當成沒人用。
+fn read_profile_records(file: &Path) -> AppResult<ProfileUsers> {
     match read_optional(file)? {
         Some(bytes) => serde_json::from_slice(&bytes).map_err(|e| AppError::Io {
-            context: format!("解析 {name}"),
+            context: format!("解析 {}", file.file_name().unwrap_or_default().to_string_lossy()),
             message: e.to_string(),
         }),
-        None => Ok(RunningMap::new()),
+        None => Ok(ProfileUsers::new()),
     }
 }
 
@@ -452,71 +454,73 @@ fn read_optional(file: &Path) -> AppResult<Option<Vec<u8>>> {
     }
 }
 
-/// 以 `read` 讀出既有紀錄後記錄一筆；順便清掉已結束的紀錄。
-fn write_record(
-    file: &Path,
-    read: fn(&Path) -> AppResult<RunningMap>,
-    key: &str,
-    process: &GameProcess,
-) -> AppResult<()> {
-    // 臨界區沒有會留下半更新狀態的 panic 點（寫檔是暫存檔＋rename），poison 後可直接沿用。
-    let _records = RECORDS.lock().unwrap_or_else(PoisonError::into_inner);
-    let mut running = read(file)?;
-    running.retain(|_, p| is_alive(p));
-    running.insert(key.to_string(), *process);
-    store::write_json_atomic(file, &running)
+/// 該 profile 是否正被至少一個仍在執行的遊戲使用；已結束的紀錄視為不存在。
+pub fn profile_in_use(paths: &AppPaths, profile_id: &str) -> AppResult<bool> {
+    Ok(read_profile_records(&paths.profiles_running_file())?
+        .get(profile_id)
+        .is_some_and(|users| users.iter().any(is_alive)))
 }
 
-/// 刪掉 `key` 那一筆，但只在它仍是 `process` 時；已換成別的程序（例如之後又登入）就不動。
-fn remove_record(
-    file: &Path,
-    read: fn(&Path) -> AppResult<RunningMap>,
-    key: &str,
-    process: &GameProcess,
-) -> AppResult<()> {
-    // poison 的處理同 `write_record`。
+/// 注入成功後記錄 profile 佔用；同一 profile 已有別的遊戲在用時並列記錄（共用）。
+pub fn mark_running(paths: &AppPaths, profile_id: &str, process: &GameProcess) -> AppResult<()> {
     let _records = RECORDS.lock().unwrap_or_else(PoisonError::into_inner);
-    let mut running = read(file)?;
-    if running.get(key) != Some(process) {
+    let file = paths.profiles_running_file();
+    let mut running = read_profile_records(&file)?;
+    for users in running.values_mut() {
+        users.retain(is_alive);
+    }
+    running.retain(|_, users| !users.is_empty());
+    running.entry(profile_id.to_string()).or_default().push(*process);
+    store::write_json_atomic(&file, &running)
+}
+
+/// 撤銷 [`mark_running`]（遊戲提早結束時）：只刪 `process` 那一筆，同一 profile 的其他遊戲不動。
+pub fn unmark_running(paths: &AppPaths, profile_id: &str, process: &GameProcess) -> AppResult<()> {
+    let _records = RECORDS.lock().unwrap_or_else(PoisonError::into_inner);
+    let file = paths.profiles_running_file();
+    let mut running = read_profile_records(&file)?;
+    let Some(users) = running.get_mut(profile_id) else {
+        return Ok(());
+    };
+    let before = users.len();
+    users.retain(|p| p != process);
+    if users.len() == before {
         return Ok(());
     }
-    running.remove(key);
-    store::write_json_atomic(file, &running)
+    if users.is_empty() {
+        running.remove(profile_id);
+    }
+    store::write_json_atomic(&file, &running)
 }
 
-/// 該 profile 是否正被一個仍在執行的遊戲使用；已結束的紀錄視為不存在。
-pub fn profile_in_use(paths: &AppPaths, profile_id: &str) -> AppResult<bool> {
-    Ok(read_records(&paths.running_file())?
-        .get(profile_id)
-        .is_some_and(is_alive))
-}
-
-/// 注入成功後記錄 profile 佔用。
-pub fn mark_running(paths: &AppPaths, profile_id: &str, process: &GameProcess) -> AppResult<()> {
-    write_record(&paths.running_file(), read_records, profile_id, process)
-}
-
-/// 撤銷 [`mark_running`]（遊戲提早結束時）；紀錄已換成別的程序就不動。
-pub fn unmark_running(paths: &AppPaths, profile_id: &str, process: &GameProcess) -> AppResult<()> {
-    remove_record(&paths.running_file(), read_records, profile_id, process)
-}
-
-/// 遊戲啟動成功（帶不帶衛月）後記錄帳號對應的遊戲程序。
+/// 遊戲啟動成功（帶不帶衛月）後記錄帳號對應的遊戲程序；順便清掉已結束的紀錄。
 pub fn mark_account_running(
     paths: &AppPaths,
     account_id: &str,
     process: &GameProcess,
 ) -> AppResult<()> {
-    write_record(&paths.accounts_running_file(), read_account_records, account_id, process)
+    let _records = RECORDS.lock().unwrap_or_else(PoisonError::into_inner);
+    let file = paths.accounts_running_file();
+    let mut running = read_account_records(&file)?;
+    running.retain(|_, p| is_alive(p));
+    running.insert(account_id.to_string(), *process);
+    store::write_json_atomic(&file, &running)
 }
 
-/// 撤銷 [`mark_account_running`]（遊戲提早結束時）；紀錄已換成別的程序就不動。
+/// 撤銷 [`mark_account_running`]（遊戲提早結束時）；紀錄已換成別的程序（例如之後又登入）就不動。
 pub fn unmark_account_running(
     paths: &AppPaths,
     account_id: &str,
     process: &GameProcess,
 ) -> AppResult<()> {
-    remove_record(&paths.accounts_running_file(), read_account_records, account_id, process)
+    let _records = RECORDS.lock().unwrap_or_else(PoisonError::into_inner);
+    let file = paths.accounts_running_file();
+    let mut running = read_account_records(&file)?;
+    if running.get(account_id) != Some(process) {
+        return Ok(());
+    }
+    running.remove(account_id);
+    store::write_json_atomic(&file, &running)
 }
 
 /// 遊戲仍在執行的帳號 id 與遊戲 pid（依帳號 id 排序）；已結束的只略過不寫回（讀取端不持有 launch mutex）。
@@ -553,6 +557,7 @@ mod tests {
             channel: DalamudChannel::Goatcorp,
             injection_delay_ms: 0,
             data_dir,
+            share_confirmed: false,
         }
     }
 
@@ -600,49 +605,55 @@ mod tests {
         let me = process_identity(std::process::id())
             .expect("identity")
             .expect("current process is alive");
+        let reused = GameProcess {
+            pid: me.pid,
+            created: me.created.wrapping_add(1),
+        };
+        let exited = GameProcess {
+            pid: u32::MAX - 3,
+            created: 1,
+        };
 
-        let mut seeded = RunningMap::new();
-        seeded.insert(
-            "wrong-time".into(),
-            GameProcess {
-                pid: me.pid,
-                created: me.created.wrapping_add(1),
-            },
-        );
-        seeded.insert(
-            "no-such-pid".into(),
-            GameProcess {
-                pid: u32::MAX - 3,
-                created: 1,
-            },
-        );
-        seeded.insert("alive".into(), me);
-        store::write_json_atomic(&paths.running_file(), &seeded).expect("seed");
+        let mut seeded = ProfileUsers::new();
+        seeded.insert("wrong-time".into(), vec![reused]);
+        seeded.insert("no-such-pid".into(), vec![exited]);
+        seeded.insert("alive".into(), vec![me]);
+        // 共用中後開的那個先結束：先開的還在，仍算佔用。
+        seeded.insert("shared".into(), vec![me, exited]);
+        store::write_json_atomic(&paths.profiles_running_file(), &seeded).expect("seed");
 
         assert!(!profile_in_use(&paths, "wrong-time").expect("read"));
         assert!(!profile_in_use(&paths, "no-such-pid").expect("read"));
         assert!(!profile_in_use(&paths, "never-ran").expect("read"));
         assert!(profile_in_use(&paths, "alive").expect("read"));
+        assert!(profile_in_use(&paths, "shared").expect("read"));
 
         mark_running(&paths, "new", &me).expect("write");
-        let after = read_records(&paths.running_file()).expect("read");
+        let after = read_profile_records(&paths.profiles_running_file()).expect("read");
         assert_eq!(
             after.keys().map(String::as_str).collect::<Vec<_>>(),
-            ["alive", "new"]
+            ["alive", "new", "shared"]
         );
+        assert_eq!(after["shared"], [me]);
 
-        // 帳號紀錄共用同一套剔除邏輯：讀取只回仍在執行者，寫入時清掉已結束者。
-        store::write_json_atomic(&paths.accounts_running_file(), &seeded).expect("seed");
+        // 再有遊戲用同一個 profile：並列記錄，不取代先開的。
+        mark_running(&paths, "alive", &reused).expect("share");
+        let shared = read_profile_records(&paths.profiles_running_file()).expect("read");
+        assert_eq!(shared["alive"], [me, reused]);
+
+        // 帳號紀錄同樣：讀取只回仍在執行者，寫入時清掉已結束者。
+        let mut accounts = RunningMap::new();
+        accounts.insert("wrong-time".into(), reused);
+        accounts.insert("no-such-pid".into(), exited);
+        accounts.insert("alive".into(), me);
+        store::write_json_atomic(&paths.accounts_running_file(), &accounts).expect("seed");
         assert_eq!(running_accounts(&paths).expect("read"), ["alive"]);
         mark_account_running(&paths, "acc", &me).expect("write");
         assert_eq!(running_accounts(&paths).expect("read"), ["acc", "alive"]);
-        assert_eq!(
-            read_records(&paths.accounts_running_file()).expect("read").len(),
-            2
-        );
+        assert_eq!(account_processes(&paths).expect("read").len(), 2);
     }
 
-    /// 撤銷只刪仍指向同一程序的那一筆：已換成別的程序（例如之後又登入）就不動，其他項目也不動。
+    /// 撤銷只刪同一程序的那一筆：共用中的其他遊戲、已換成別的程序（例如之後又登入）的帳號紀錄、其他項目都不動。
     #[test]
     fn unmark_removes_only_the_same_process() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -656,17 +667,23 @@ mod tests {
         };
         mark_running(&paths, "p1", &me).expect("write");
         mark_running(&paths, "p2", &me).expect("write");
+        // 最後寫：寫入前的剔除不會清掉這筆已結束的替身。
+        mark_running(&paths, "p1", &earlier).expect("share");
         mark_account_running(&paths, "acc", &me).expect("write");
 
-        unmark_running(&paths, "p1", &earlier).expect("replaced");
+        unmark_running(&paths, "p1", &earlier).expect("one of shared");
         unmark_account_running(&paths, "acc", &earlier).expect("replaced");
-        assert_eq!(read_records(&paths.running_file()).expect("read").len(), 2);
+        let profiles = read_profile_records(&paths.profiles_running_file()).expect("read");
+        assert_eq!(profiles["p1"], [me]);
+        assert_eq!(profiles["p2"], [me]);
         assert_eq!(running_accounts(&paths).expect("read"), ["acc"]);
 
+        unmark_running(&paths, "p1", &earlier).expect("already gone");
+        unmark_running(&paths, "never-ran", &me).expect("no record");
         unmark_running(&paths, "p1", &me).expect("same process");
         unmark_account_running(&paths, "acc", &me).expect("same process");
         unmark_account_running(&paths, "never-ran", &me).expect("no record");
-        let profiles = read_records(&paths.running_file()).expect("read");
+        let profiles = read_profile_records(&paths.profiles_running_file()).expect("read");
         assert_eq!(profiles.keys().map(String::as_str).collect::<Vec<_>>(), ["p2"]);
         assert!(account_processes(&paths).expect("read").is_empty());
     }
@@ -731,7 +748,7 @@ mod tests {
         let me = process_identity(std::process::id())
             .expect("identity")
             .expect("current process is alive");
-        let file = paths.running_file();
+        let file = paths.profiles_running_file();
         fs::create_dir_all(file.parent().expect("state dir")).expect("mkdir");
         fs::write(&file, b"{\"p1\":{\"pid\":1,").expect("write truncated");
 

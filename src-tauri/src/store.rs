@@ -206,6 +206,9 @@ pub struct Profile {
     /// 沿用的外部衛月資料夾（舊啟動器）；`None`＝本程式管理的 `profiles/<id>/`。
     #[serde(default)]
     pub data_dir: Option<PathBuf>,
+    /// 已確認可與執行中的遊戲共用（protocols §3）；確認後同時使用不再詢問。
+    #[serde(default)]
+    pub share_confirmed: bool,
 }
 
 impl Profile {
@@ -264,8 +267,10 @@ impl AppPaths {
     pub fn config_file(&self) -> PathBuf {
         self.root.join("config.json")
     }
-    pub fn running_file(&self) -> PathBuf {
-        self.root.join("state").join("running.json")
+    /// `state/profiles_running.json`：衛月 profile 佔用紀錄（`dalamud::profile`）。舊版的 `state/running.json`
+    /// 格式不同、不再讀取。
+    pub fn profiles_running_file(&self) -> PathBuf {
+        self.root.join("state").join("profiles_running.json")
     }
     pub fn accounts_running_file(&self) -> PathBuf {
         self.root.join("state").join("accounts_running.json")
@@ -397,6 +402,7 @@ mod tests {
             },
             injection_delay_ms: 0,
             data_dir: None,
+            share_confirmed: false,
         });
         save_config(&paths, &config).expect("save");
         let loaded = load_config(&paths).expect("load");

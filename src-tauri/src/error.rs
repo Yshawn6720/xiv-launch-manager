@@ -110,8 +110,15 @@ pub enum AppError {
     #[error("遊戲啟動後立即結束（可能超過客戶端實例上限）")]
     GameExitedEarly,
 
-    #[error("Dalamud 設定檔「{profile}」正被另一個遊戲使用")]
+    /// 登入時設定檔正被本程式啟動的另一個遊戲使用、且還沒確認過共用（protocols §3）。前端登入前會先問；只有
+    /// 前端檢查之後才開始被使用時會走到這裡，再按一次登入就會問。
+    #[error("Dalamud 設定檔「{profile}」正被另一個遊戲使用，尚未確認共用；請再按一次「登入」")]
     ProfileInUse { profile: String },
+    /// 沿用的舊啟動器資料夾已被另一個設定檔沿用。
+    #[error("這個 Dalamud 資料夾已被設定檔「{profile}」沿用")]
+    DataDirTaken { profile: String },
+    #[error("仍有帳號使用這個 Dalamud 設定檔，請先讓這些帳號改用其他設定檔")]
+    ProfileHasAccounts,
     /// 複製時來源正被遊戲使用：衛月會持續寫入設定，複製到的可能是寫到一半的檔案。
     #[error("Dalamud 設定檔「{profile}」正被執行中的遊戲使用，請先關閉遊戲再複製")]
     DuplicateProfileRunning { profile: String },
