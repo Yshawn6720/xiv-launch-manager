@@ -139,6 +139,9 @@ export interface AccountInput {
 /** 本次載入哪些 plugin。 */
 export type PluginLoad = "all" | "noThirdParty" | "none";
 
+/** 本次是否比對衛月支援的遊戲版本（只有國際服 goatcorp 有這項比對）；skip＝使用者本次選了「強制載入」。 */
+export type GameVersionCheck = "enforce" | "skip";
+
 export interface ReleaseInfo {
   tag: string;
   publishedAt: string;
@@ -423,8 +426,8 @@ export const api = {
   removeInstalledDalamud: (source: string, version: string) =>
     invoke<void>("remove_installed_dalamud", { source, version }),
   /** global 忽略 version（一律最新版）；tw 必填。回傳安裝好的版本。 */
-  installDalamud: (region: Region, version: YanmucorpVersion | null) =>
-    invoke<string>("install_dalamud", { region, version }),
+  installDalamud: (region: Region, version: YanmucorpVersion | null, versionCheck: GameVersionCheck) =>
+    invoke<string>("install_dalamud", { region, version, versionCheck }),
   /** 取消進行中的下載（Dalamud、程式更新、遊戲更新的下載／核對）、完整性檢查或設定檔複製；被取消的流程以 CANCELLED_MESSAGE 失敗。沒有進行中的工作時為 no-op。 */
   cancelDalamudDownload: () => invoke<void>("cancel_dalamud_download"),
   /** 檢查程式更新要帶的 updater target：免安裝版 `windows-x86_64-portable`，安裝版 null（plugin 預設）。 */
@@ -450,10 +453,11 @@ export const api = {
     password: string | null,
     withoutDalamud: boolean,
     plugins: PluginLoad,
+    versionCheck: GameVersionCheck,
   ) =>
     invoke<LaunchOutcome>("launch_account", {
       accountId,
-      options: { otp, password, withoutDalamud, plugins },
+      options: { otp, password, withoutDalamud, plugins, versionCheck },
     }),
   /** 預覽目前的 OTP：secret 非空白就用它（不儲存），否則用帳號已存的 OTP 金鑰。 */
   previewOtp: (accountId: string | null, secret: string | null) =>

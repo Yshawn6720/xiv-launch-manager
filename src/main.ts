@@ -30,6 +30,7 @@ import {
   type DetectedDalamudData,
   type FolderTarget,
   type GameUpdateProgress,
+  type GameVersionCheck,
   type GlobalLanguage,
   type InstalledVersion,
   type IntegrityOutcome,
@@ -286,13 +287,20 @@ interface LoginDraft {
   advancedOpen: boolean;
 }
 
-type DalamudMode = "normal" | "noThirdParty" | "noPlugin" | "off";
+type DalamudMode = "normal" | "noThirdParty" | "noPlugin" | "off" | "force";
 const DALAMUD_MODE_TEXT: Record<DalamudMode, string> = {
   normal: "正常",
   noThirdParty: "不載入第三方 plugin",
   noPlugin: "不載入任何 plugin",
   off: "不載入 Dalamud",
+  // 只有國際服（goatcorp 才有遊戲版本比對）；送出前警告確認，送出後回到「正常」（protocols §1.5）。
+  force: "強制載入（忽略遊戲版本）",
 };
+
+const FORCE_DALAMUD_WARNING =
+  "強制載入會略過 Dalamud 的遊戲版本檢查。\n\n" +
+  "遊戲剛改版、Dalamud 官方還沒支援新版本時硬注入，可能讓遊戲崩潰，或讓插件讀錯資料而行為異常。官方 XIVLauncher 不提供這個選項。\n\n" +
+  "這個選擇只用於這一次登入，之後回到「正常」。仍要強制載入嗎？";
 
 let draft: LoginDraft | null = null;
 
@@ -1287,11 +1295,10 @@ function renderLogin(): void {
   // 已存帳號：選了就套用（保留原本的即時套用）；新帳號：儲存後才套用。
   const dalamud = h("select", { id: "login-dalamud" });
   let choices = new Map<string, DalamudChoice>();
-  const dalamudMode = h(
-    "select",
-    { id: "login-dalamud-mode" },
-    ...(Object.keys(DALAMUD_MODE_TEXT) as DalamudMode[]).map((m) => option(m, DALAMUD_MODE_TEXT[m], d.dalamudMode === m)),
+  const modeOptions = (Object.keys(DALAMUD_MODE_TEXT) as DalamudMode[]).map((m) =>
+    option(m, DALAMUD_MODE_TEXT[m], d.dalamudMode === m),
   );
+  const dalamudMode = h("select", { id: "login-dalamud-mode" }, ...modeOptions);
   dalamudMode.addEventListener("change", () => {
     d.dalamudMode = dalamudMode.value as DalamudMode;
     paintAdvanced();
@@ -1366,6 +1373,9 @@ function renderLogin(): void {
     dalamudLine.replaceChildren(...(c?.profile ? profileDetails(c.profile, c.path, a !== null) : []));
     dalamudLine.hidden = !c?.profile;
     dalamudModeField.hidden = !applied();
+    // 強制載入只對國際服有意義；換區服時 d.dalamudMode 已重設為正常。
+    const force = modeOptions.find((o) => o.value === "force");
+    if (force) force.hidden = force.disabled = d.region !== "global";
     paintAdvanced();
   };
   actFollow.addEventListener("change", () => {
@@ -1520,8 +1530,16 @@ function renderLogin(): void {
     }
     const label = d.name.trim() || d.username.trim();
     const mode = applied() ? d.dalamudMode : "normal";
+    if (mode === "force") {
+      if (!confirm(FORCE_DALAMUD_WARNING)) return;
+      // 每次都要重選：送出後就回到「正常」，下次登入不沿用。
+      d.dalamudMode = "normal";
+      dalamudMode.value = "normal";
+      paintAdvanced();
+    }
     const withoutDalamud = mode === "off";
     const plugins: PluginLoad = mode === "noThirdParty" ? "noThirdParty" : mode === "noPlugin" ? "none" : "all";
+    const versionCheck: GameVersionCheck = mode === "force" ? "skip" : "enforce";
     const manual = otpTypedHere(d);
     const typedOtp = manual ? d.otp.trim() || null : null;
     // 不記住密碼：本次輸入的密碼直接交給登入，不經 saveAccount。
@@ -1563,7 +1581,7 @@ function renderLogin(): void {
         // 結果（同版本且本體重核通過），不再準備一次。
         if (profile) {
           say("準備 Dalamud…");
-          await api.installDalamud(channelRegion(profile.channel), channelVersion(profile.channel));
+          await api.installDalamud(channelRegion(profile.channel), channelVersion(profile.channel), versionCheck);
         }
         let code = typedOtp;
         if (code === null && manual) {
@@ -1577,7 +1595,7 @@ function renderLogin(): void {
         // 準備 Dalamud 只到這裡；之後的登入、啟動遊戲與注入（遊戲初始化慢時可能等數十秒）不能還顯示「準備 Dalamud…」，
         // 訊息列回到「登入」，各階段顯示在登入面板的進度。
         say(`登入 ${label}…`);
-        const r = await api.launchAccount(id, code, typedPassword, withoutDalamud, plugins);
+        const r = await api.launchAccount(id, code, typedPassword, withoutDalamud, plugins, versionCheck);
         // 狀態與訊息都用「・」接版本，避免和 Dalamud 標籤裡的括號疊在一起。
         const loaded = r.dalamudVersion
           ? `・${dalamudVersionLabel(d.region, r.dalamudVersion, await installedDalamudVersion(d.region, r.dalamudVersion))}`
@@ -2304,7 +2322,7 @@ function installRegion(region: Region, version: YanmucorpVersion | null): void {
   installProgress?.cancel.focus();
   void run(`下載${regionLabel(region)} Dalamud`, async () => {
     try {
-      const dir = await api.installDalamud(region, version);
+      const dir = await api.installDalamud(region, version, "enforce");
       return `已下載${regionLabel(region)} ${dalamudVersionLabel(region, dir, await installedDalamudVersion(region, dir))}`;
     } finally {
       // 在 run() 重繪之前清掉，重建的面板就回到一般狀態。

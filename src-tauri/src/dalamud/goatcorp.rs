@@ -43,8 +43,21 @@ pub async fn fetch_version_info(client: &reqwest::Client) -> AppResult<VersionIn
     Ok(info)
 }
 
-/// `SupportedGameVer` 必須等於本機 `ffxivgame.ver`，否則不可注入。
-pub fn check_game_version(info: &VersionInfo, install_dir: &Path) -> AppResult<()> {
+/// 本次登入是否比對 `SupportedGameVer`（protocols §1.5）。預設比對；`Skip` 只在使用者該次登入選「強制載入」時送來。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GameVersionCheck {
+    #[default]
+    Enforce,
+    Skip,
+}
+
+/// `Enforce` 時 `SupportedGameVer` 必須等於本機 `ffxivgame.ver`，否則不可注入；`Skip` 不比對。
+pub fn check_game_version(info: &VersionInfo, install_dir: &Path, check: GameVersionCheck) -> AppResult<()> {
+    match check {
+        GameVersionCheck::Enforce => {}
+        GameVersionCheck::Skip => return Ok(()),
+    }
     let installed = game::game_version(install_dir)?;
     if info.supported_game_ver != installed {
         return Err(AppError::DalamudGameVersionMismatch {
@@ -86,4 +99,38 @@ pub async fn ensure_body(
     })
     .await?;
     Ok(target)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::*;
+
+    fn info(supported: &str) -> VersionInfo {
+        VersionInfo {
+            assembly_version: "15.0.3.8".into(),
+            supported_game_ver: supported.into(),
+            runtime_version: "10.0.0".into(),
+            runtime_required: true,
+            download_url: "https://example.invalid/dalamud.zip".into(),
+        }
+    }
+
+    #[test]
+    fn game_version_mismatch_blocks_unless_skipped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::create_dir_all(dir.path().join("game")).expect("mkdir");
+        fs::write(dir.path().join("game/ffxivgame.ver"), "2026.10.16.0000.0000\r\n").expect("write");
+        let stale = info("2026.10.06.0000.0000");
+
+        let err = check_game_version(&stale, dir.path(), GameVersionCheck::Enforce).expect_err("mismatch");
+        assert!(matches!(
+            err,
+            AppError::DalamudGameVersionMismatch { ref supported, ref installed }
+                if supported == "2026.10.06.0000.0000" && installed == "2026.10.16.0000.0000"
+        ));
+        assert!(check_game_version(&stale, dir.path(), GameVersionCheck::Skip).is_ok());
+        assert!(check_game_version(&info("2026.10.16.0000.0000"), dir.path(), GameVersionCheck::Enforce).is_ok());
+    }
 }

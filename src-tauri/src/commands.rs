@@ -776,12 +776,14 @@ fn install_channel(region: Region, version: Option<YanmucorpVersion>) -> AppResu
 }
 
 /// 下載並安裝某區服的衛月（不啟動遊戲）；安裝目錄依版本共用，與設定檔無關。回傳安裝好的版本。
+/// `version_check` 只在登入前準備、使用者本次選了「強制載入」時為 `Skip`（protocols §1.5）。
 #[tauri::command]
 pub async fn install_dalamud(
     app: AppHandle,
     state: State<'_, AppState>,
     region: Region,
     version: Option<YanmucorpVersion>,
+    version_check: dalamud::GameVersionCheck,
 ) -> AppResult<String> {
     let channel = install_channel(region, version)?;
     let _guard = state.launch_lock.lock().await;
@@ -798,6 +800,7 @@ pub async fn install_dalamud(
         launch::install_progress_id(region),
         &channel,
         &install,
+        version_check,
         &cancel,
     )
     .await?;

@@ -18,7 +18,7 @@ use tokio::task::JoinHandle;
 
 use crate::act_bridge::ActTargets;
 use crate::dalamud::{
-    self, CancelToken, GameProcess, InjectRequest, PluginLoad, PreparedCache, PreparedDalamud, Progress,
+    self, CancelToken, GameProcess, GameVersionCheck, InjectRequest, PluginLoad, PreparedCache, PreparedDalamud, Progress,
 };
 use crate::error::{AppError, AppResult};
 use crate::global;
@@ -53,6 +53,9 @@ pub struct LaunchOptions {
     /// 本次載入哪些 plugin；不載入衛月時不使用。
     #[serde(default)]
     pub plugins: PluginLoad,
+    /// 本次是否比對衛月支援的遊戲版本（只有 goatcorp 有這項比對）；不載入衛月時不使用。
+    #[serde(default)]
+    pub version_check: GameVersionCheck,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -392,7 +395,8 @@ pub async fn launch_account(
                 Some(Err(_)) => return Err(AppError::DalamudLeaseUnavailable),
                 Some(Ok(_)) | None => {}
             }
-            prepared = prepare_profile(app, paths, prepared_cache, account_id, profile.as_ref(), &install, cancel)
+            let check = options.version_check;
+            prepared = prepare_profile(app, paths, prepared_cache, account_id, profile.as_ref(), &install, check, cancel)
                 .await?;
             // 參數以當下的 tick 加密（protocols §1.2），在準備衛月之後、啟動之前才產生。
             let game_version = crate::game::game_version(&install)?;
@@ -402,7 +406,8 @@ pub async fn launch_account(
             emit_stage(app, account_id, &format!("檢查{region}遊戲版本"));
             let checked = tw::login::check_version(&install).await?;
             update::require_up_to_date(pending, region, &install, checked)?;
-            prepared = prepare_profile(app, paths, prepared_cache, account_id, profile.as_ref(), &install, cancel)
+            let check = options.version_check;
+            prepared = prepare_profile(app, paths, prepared_cache, account_id, profile.as_ref(), &install, check, cancel)
                 .await?;
             emit_stage(app, account_id, &format!("{region} 登入確認（請在跳出的視窗按「登入」）"));
             let label = if account.name.is_empty() { &account.username } else { &account.name };
@@ -500,6 +505,7 @@ pub async fn prepare_dalamud(
     progress_id: &str,
     channel: &DalamudChannel,
     install: &Path,
+    check: GameVersionCheck,
     cancel: &CancelToken,
 ) -> AppResult<PreparedDalamud> {
     let app = app.clone();
@@ -515,10 +521,11 @@ pub async fn prepare_dalamud(
             },
         ); // 進度事件只影響畫面
     };
-    dalamud::prepare(paths, channel, install, &report, cancel).await
+    dalamud::prepare(paths, channel, install, check, &report, cancel).await
 }
 
 /// 帳號綁了衛月 profile 時才準備衛月；登入前剛準備好的結果可沿用就不再準備（`PreparedCache::reuse_or_prepare`）。
+#[allow(clippy::too_many_arguments)] // quality-allow: 與 launch_account 相同，共用狀態與本次登入選項逐一傳入
 async fn prepare_profile(
     app: &AppHandle,
     paths: &AppPaths,
@@ -526,12 +533,13 @@ async fn prepare_profile(
     account_id: &str,
     profile: Option<&Profile>,
     install: &Path,
+    check: GameVersionCheck,
     cancel: &CancelToken,
 ) -> AppResult<Option<PreparedDalamud>> {
     let Some(p) = profile else {
         return Ok(None);
     };
-    let prepare = prepare_dalamud(app, paths, account_id, &p.channel, install, cancel);
+    let prepare = prepare_dalamud(app, paths, account_id, &p.channel, install, check, cancel);
     Ok(Some(prepared_cache.reuse_or_prepare(&p.channel, install, prepare).await?))
 }
 

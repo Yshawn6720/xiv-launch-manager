@@ -99,7 +99,7 @@ pub enum AppError {
     DalamudRemoteDisabled,
     #[error("無法確認國際服 Dalamud 是否可用，已停止登入；可稍後再試，或在登入頁「進階 › 本次載入方式」選「不載入 Dalamud」後再登入")]
     DalamudLeaseUnavailable,
-    #[error("Dalamud {supported} 不支援目前遊戲版本 {installed}；可在登入頁「進階 › 本次載入方式」選「不載入 Dalamud」後再登入")]
+    #[error("Dalamud 目前只支援遊戲版本 {supported}，本機遊戲已是 {installed}（遊戲剛改版，需等 Dalamud 更新）；可在登入頁「進階 › 本次載入方式」選「不載入 Dalamud」後再登入，或選「強制載入（忽略遊戲版本）」自行承擔遊戲崩潰的風險")]
     DalamudGameVersionMismatch { supported: String, installed: String },
     #[error("檔案完整性核對失敗：{file}")]
     Integrity { file: String },

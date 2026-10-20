@@ -32,6 +32,7 @@ pub use profile::{
 };
 #[cfg(test)]
 pub use profile::process_identity;
+pub use goatcorp::GameVersionCheck;
 pub use runner::{InjectMode, InjectRequest, PluginLoad, launch_plain, launch_with_dalamud, watch_early_exit};
 pub use yanmucorp::{ReleaseInfo, list_releases};
 
@@ -50,11 +51,13 @@ pub struct PreparedDalamud {
 }
 
 /// 依版本選擇確保本體、runtime、assets 就緒。goatcorp 另需本機遊戲版本與
-/// `SupportedGameVer` 相符（`install_dir`＝該區服遊戲安裝根目錄）。被 `cancel` 取消時回 `Cancelled`。
+/// `SupportedGameVer` 相符（`install_dir`＝該區服遊戲安裝根目錄），`check` 為 `Skip` 時不比對；yanmucorp 沒有
+/// 這項比對，忽略 `check`。被 `cancel` 取消時回 `Cancelled`。
 pub async fn prepare(
     paths: &AppPaths,
     channel: &DalamudChannel,
     install_dir: &Path,
+    check: GameVersionCheck,
     progress: &install::ProgressFn,
     cancel: &CancelToken,
 ) -> AppResult<PreparedDalamud> {
@@ -63,7 +66,7 @@ pub async fn prepare(
     match channel {
         DalamudChannel::Goatcorp => {
             let info = cancel.race(goatcorp::fetch_version_info(&client)).await?;
-            goatcorp::check_game_version(&info, install_dir)?;
+            goatcorp::check_game_version(&info, install_dir, check)?;
             let injector_dir =
                 goatcorp::ensure_body(&client, paths, &info, progress, cancel).await?;
             // RuntimeRequired 為假時與 XL 相同不下載 runtime；目錄可能不存在。
