@@ -1,4 +1,5 @@
 //! 啟動編排：dirty 標記 →（國際服）閘道狀態 → 遊戲版本檢查 → 準備衛月 → 登入 → 啟動／注入 → 記錄佔用
+//! → 等這個遊戲結束時判定角色使用標記（`characters::usage::UsageWatch`）
 //! →（帳號勾了「ACT 跟這個帳號」時）寫 ACT 連動指令檔並等這個遊戲結束（結束時切回，見 `act_bridge::ActTargets`）
 //! →（同上，且該區服的 ACT 設定開啟時）開該區服的 ACT。遊戲開出就做後續步驟並回傳成功；是否提早結束（可能超過
 //! 客戶端實例上限）在背景觀察（[`EarlyExitWatch`]），觀察到時撤銷執行狀態並以 [`GAME_EXITED_EARLY_EVENT`] 通知前端。
@@ -17,6 +18,7 @@ use tauri::{AppHandle, Emitter};
 use tokio::task::JoinHandle;
 
 use crate::act_bridge::ActTargets;
+use crate::characters::{self, usage::UsageWatch};
 use crate::dalamud::{
     self, CancelToken, GameProcess, GameVersionCheck, InjectRequest, PluginLoad, PreparedCache, PreparedDalamud, Progress,
 };
@@ -318,6 +320,7 @@ pub async fn launch_account(
     pending: &PendingUpdates,
     act_targets: &ActTargets,
     prepared_cache: &PreparedCache,
+    character_usage: &UsageWatch,
     account_id: &str,
     options: LaunchOptions,
     cancel: &CancelToken,
@@ -457,6 +460,8 @@ pub async fn launch_account(
     let early_exit = EarlyExitWatch::start(account_id, profile.as_ref().map(|p| p.id.clone()), process);
     // 帳號執行紀錄只供畫面顯示；遊戲已經開起來，寫失敗不能回報成啟動失敗（使用者會重試、開出第二個遊戲）。
     let _ = dalamud::mark_account_running(paths, account_id, &process);
+    // 角色使用標記只供畫面輔助辨認，等待與判定的錯誤只記 log。
+    character_usage.follow(region, account_id, process, characters::other_region_exes(&config, region));
     // ACT 連動（protocols §6.2）：同上，寫不成只回警告。先寫再開 ACT，ACT 一開外掛就讀得到這次的遊戲。
     // 寫成後背景等這個遊戲結束，結束時切回同服仍開著、有勾的帳號（等待與切回的錯誤只記 log）。
     let act = config.act.get(region);

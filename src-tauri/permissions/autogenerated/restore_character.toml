@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-restore-character"
+description = "Enables the restore_character command without any pre-configured scope."
+commands.allow = ["restore_character"]
+
+[[permission]]
+identifier = "deny-restore-character"
+description = "Denies the restore_character command without any pre-configured scope."
+commands.deny = ["restore_character"]

@@ -176,10 +176,25 @@ pub async fn fetch_bytes(request: reqwest::RequestBuilder, context: &str) -> App
     Ok(Vec::from(body))
 }
 
-/// JSON 解析失敗只回分類；容許 UTF-8 BOM（上游部分檔案由 .NET 工具產生）。
+/// JSON 解析失敗只回分類。編碼依 BOM：UTF-8（可帶 BOM）或 UTF-16 LE／BE（帶 BOM）——上游部分檔案由
+/// .NET／PowerShell 工具產生（kamori runtime hash 表從 .NET 10 起是 UTF-16 LE，protocols §1.5）。
 pub fn parse_json<T: DeserializeOwned>(bytes: &[u8], context: &str) -> AppResult<T> {
-    let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
-    serde_json::from_slice(bytes).map_err(|_| AppError::protocol(context))
+    let utf16 = |rest: &[u8], unit: fn([u8; 2]) -> u16| -> AppResult<T> {
+        let (pairs, []) = rest.as_chunks::<2>() else {
+            return Err(AppError::protocol(context));
+        };
+        let text = String::from_utf16(&pairs.iter().map(|p| unit(*p)).collect::<Vec<_>>())
+            .map_err(|_| AppError::protocol(context))?;
+        serde_json::from_str(&text).map_err(|_| AppError::protocol(context))
+    };
+    match bytes {
+        [0xFF, 0xFE, rest @ ..] => utf16(rest, u16::from_le_bytes),
+        [0xFE, 0xFF, rest @ ..] => utf16(rest, u16::from_be_bytes),
+        _ => {
+            let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes);
+            serde_json::from_slice(bytes).map_err(|_| AppError::protocol(context))
+        }
+    }
 }
 
 pub async fn fetch_json<T: DeserializeOwned>(
@@ -925,6 +940,32 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let table = sample_tree(dir.path());
         verify_hash_table(dir.path(), &table).expect("verify");
+    }
+
+    /// kamori 的 runtime hash 表從 .NET 10 起是 UTF-16 LE（帶 BOM，2026-10-22 實測 10.0.14）。
+    #[test]
+    fn hash_table_accepts_utf8_and_utf16_with_bom() {
+        let json = "{\"host\\\\fxr\\\\10.0.14\\\\hostfxr.dll\": \"986964A61A8A5FFD3A1353A0227CD626\"}";
+        let utf16 = |bom: [u8; 2], unit: fn(u16) -> [u8; 2]| -> Vec<u8> {
+            bom.into_iter().chain(json.encode_utf16().flat_map(unit)).collect()
+        };
+        let inputs = [
+            json.as_bytes().to_vec(),
+            [b"\xEF\xBB\xBF".as_slice(), json.as_bytes()].concat(),
+            utf16([0xFF, 0xFE], u16::to_le_bytes),
+            utf16([0xFE, 0xFF], u16::to_be_bytes),
+        ];
+        for bytes in inputs {
+            let table = parse_hash_table(&bytes, "t").expect("parse");
+            assert_eq!(
+                table.get("host\\fxr\\10.0.14\\hostfxr.dll").map(String::as_str),
+                Some("986964A61A8A5FFD3A1353A0227CD626")
+            );
+        }
+        // UTF-16 長度不是偶數＝截斷，不猜。
+        let mut truncated = utf16([0xFF, 0xFE], u16::to_le_bytes);
+        truncated.pop();
+        assert!(matches!(parse_hash_table(&truncated, "t"), Err(AppError::Protocol { .. })));
     }
 
     #[test]

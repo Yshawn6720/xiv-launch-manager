@@ -9,6 +9,7 @@ use tauri::{AppHandle, State};
 use tokio::sync::Mutex;
 
 use crate::act::{self, ActLaunch, ActStatus};
+use crate::characters;
 use crate::act_bridge::{self, ActChange, ActChoice, DualResult, LinkStatus};
 use crate::act_plugin::{self, LatestCache, PluginVersions};
 use crate::dalamud::{
@@ -48,6 +49,8 @@ pub struct AppState {
     pub prepared_dalamud: dalamud::PreparedCache,
     /// FFXIV 插件最新版的記憶體快取（protocols §6.6）。
     pub act_plugin_latest: LatestCache,
+    /// 本程式開的遊戲結束時判定角色「最後由哪個帳號使用」。
+    pub character_usage: characters::usage::UsageWatch,
 }
 
 #[derive(Debug, Serialize)]
@@ -111,7 +114,7 @@ pub async fn get_config(state: State<'_, AppState>) -> AppResult<ConfigView> {
     })
 }
 
-async fn update_config(
+pub(crate) async fn update_config(
     state: &AppState,
     change: impl FnOnce(&mut Config) -> AppResult<()>,
 ) -> AppResult<()> {
@@ -202,6 +205,8 @@ pub enum FolderTarget {
     Detected { path: PathBuf },
     /// 該區服的遊戲設定資料夾（`文件\My Games\` 下）；不存在時不建立。
     GameConfig { region: Region },
+    /// 角色的備份資料夾（protocols §7、`characters`）；不存在時不建立。
+    CharacterBackups { region: Region, id: String },
 }
 
 fn folder_path(
@@ -219,6 +224,10 @@ fn folder_path(
             dalamud::profile_log_dir(paths, launch::find_profile(config, id)?)?
         }
         FolderTarget::Detected { path } => find_detected(detected, path)?.path.clone(),
+        FolderTarget::CharacterBackups { region, id } => {
+            characters::check_id(id)?;
+            characters::backups_of(&paths.character_backups_dir(*region), id)
+        }
         FolderTarget::GameConfig { region } => {
             let dir = crate::game::config_dir(*region)?;
             if !dir.is_dir() {
@@ -872,6 +881,7 @@ pub async fn launch_account(
         &state.pending_updates,
         &state.act_targets,
         &state.prepared_dalamud,
+        &state.character_usage,
         &account_id,
         options,
         &cancel,
@@ -1503,6 +1513,7 @@ mod tests {
         AppState {
             act_targets: act_bridge::ActTargets::new(paths.clone()),
             prepared_dalamud: dalamud::PreparedCache::default(),
+            character_usage: characters::usage::UsageWatch::new(paths.clone()),
             paths,
             launch_lock: Mutex::new(()),
             config_lock: Mutex::new(()),

@@ -109,7 +109,73 @@ export type FolderTarget =
   | { kind: "profileLogs"; id: string }
   | { kind: "detected"; path: string }
   /** 該區服的遊戲設定資料夾（文件\My Games\ 下）。 */
-  | { kind: "gameConfig"; region: Region };
+  | { kind: "gameConfig"; region: Region }
+  /** 角色的備份資料夾（%APPDATA%\xiv-launch-manager\characters\ 下）。 */
+  | { kind: "characterBackups"; region: Region; id: string };
+
+/** 角色備份的種類（Rust `BackupKind`）：auto＝還原或轉移前自動建立，每角色只留最新 10 份。 */
+export type BackupKind = "manual" | "auto";
+
+/** 一份角色備份；id＝`YYYYMMDD-HHMMSS-mmm-<kind>`（本機時間），字串順序即時間順序。 */
+export interface CharacterBackup {
+  id: string;
+  kind: BackupKind;
+}
+
+/** 「最後由 <帳號> 使用」標記（Rust `Usage`）；at 為 Unix 秒。 */
+export interface CharacterUsage {
+  accountId: string;
+  at: number;
+}
+
+/** 一個角色（Rust `CharacterView`）：id＝16 位 hex；lastPlayed 為 Unix 秒；backups 新到舊。 */
+export interface CharacterView {
+  id: string;
+  lastPlayed: number | null;
+  backups: CharacterBackup[];
+  name: string | null;
+  usage: CharacterUsage | null;
+}
+
+/** 一個區服的角色（Rust `RegionCharacters`）；exists 為 false＝區服資料夾不存在（遊戲沒在這台電腦啟動過）。 */
+export interface RegionCharacters {
+  dir: string;
+  exists: boolean;
+  characters: CharacterView[];
+}
+
+export type CharacterList = Record<Region, RegionCharacters>;
+
+/** 一個角色的識別（Rust `CharacterKey`）。 */
+export interface CharacterKey {
+  region: Region;
+  id: string;
+}
+
+/** 轉移分類（Rust `Category`，protocols §7.3）。 */
+export type TransferCategory =
+  | "hotbar"
+  | "macro"
+  | "keybind"
+  | "chatFilter"
+  | "hud"
+  | "characterSettings"
+  | "controls";
+
+/** 一個分類的轉移計畫（Rust `CategoryPlan`）；skip 時 reason 說明原因；missingKeys＝合併時目標沒有、不會新增的 key 數。 */
+export interface CategoryPlan {
+  category: TransferCategory;
+  action: "copy" | "merge" | "skip";
+  reason: string | null;
+  missingKeys: number;
+}
+
+/** 轉移結果（Rust `TransferResult`）；backup＝寫入前的自動備份 id，沒有寫入時為 null。 */
+export interface TransferResult {
+  done: TransferCategory[];
+  skipped: CategoryPlan[];
+  backup: string | null;
+}
 
 /** 帳號要套用的 Dalamud 設定檔；detected＝偵測到的舊資料路徑（後端沿用對應的設定檔，沒有就在同一次寫入中新增後綁定）。 */
 export type BindTarget =
@@ -497,4 +563,20 @@ export const api = {
   enableActLink: () => invoke<ActChange[]>("enable_act_link"),
   /** 以主 ACT 為底建立另一服用的 ACT，並寫回兩服的 ACT 設定；有 ACT 在執行就失敗。 */
   createDualAct: () => invoke<ActDualResult>("create_dual_act"),
+  /** 兩服的角色、自訂名稱、使用標記與備份。只讀檔案。 */
+  listCharacters: () => invoke<CharacterList>("list_characters"),
+  /** 設定角色的自訂名稱；空白＝刪除。 */
+  setCharacterLabel: (region: Region, id: string, name: string) =>
+    invoke<void>("set_character_label", { region, id, name }),
+  /** 手動備份角色（只讀遊戲檔，遊戲執行中也可以）；回備份 id。 */
+  backupCharacter: (region: Region, id: string) => invoke<string>("backup_character", { region, id }),
+  /** 把角色還原成 backupId；該區服遊戲或官方啟動器執行中、或沒設定遊戲路徑時失敗。回寫入前的自動備份 id。 */
+  restoreCharacter: (region: Region, id: string, backupId: string) =>
+    invoke<string>("restore_character", { region, id, backupId }),
+  /** 轉移計畫（只讀）；來源與目標相同時失敗。 */
+  planCharacterTransfer: (from: CharacterKey, to: CharacterKey) =>
+    invoke<CategoryPlan[]>("plan_character_transfer", { from, to }),
+  /** 轉移 categories 中可轉的分類（寫入前自動備份目標）；目標區服的遊戲執行中時失敗。 */
+  transferCharacter: (from: CharacterKey, to: CharacterKey, categories: TransferCategory[]) =>
+    invoke<TransferResult>("transfer_character", { from, to, categories }),
 };

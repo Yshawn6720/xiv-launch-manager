@@ -1,6 +1,7 @@
 mod act;
 mod act_bridge;
 mod act_plugin;
+mod characters;
 mod commands;
 mod dalamud;
 mod error;
@@ -58,6 +59,7 @@ pub fn run() {
             // ACT 連動（protocols §6.2）：對指令檔裡的目標重新開始等待，本程式關閉期間已結束的立刻切回。
             let act_targets = act_bridge::ActTargets::new(paths.clone());
             act_targets.resume();
+            let character_usage = characters::usage::UsageWatch::new(paths.clone());
             // 設定 › 介面：套用已存的視窗主題；遊戲啟動後收起、全部結束後還原。
             let main_window = main_window::MainWindow::new(paths.clone());
             main_window.setup(app.handle());
@@ -71,6 +73,7 @@ pub fn run() {
                 act_targets,
                 prepared_dalamud: dalamud::PreparedCache::default(),
                 act_plugin_latest: act_plugin::LatestCache::default(),
+                character_usage,
             });
             app.manage(tw::RecaptchaState::default());
             Ok(())
@@ -113,6 +116,12 @@ pub fn run() {
             commands::save_act_settings,
             commands::list_act_choices,
             commands::get_running_status,
+            characters::commands::list_characters,
+            characters::commands::set_character_label,
+            characters::commands::backup_character,
+            characters::commands::restore_character,
+            characters::commands::plan_character_transfer,
+            characters::commands::transfer_character,
             commands::launch_act,
             commands::get_act_link_status,
             commands::get_act_plugin_versions,

@@ -1,13 +1,15 @@
 //! 設定檔與資料目錄。`config.json` 不含任何 secret（secret 在 `secrets.rs`）。
 
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 use windows::Win32::Foundation::WIN32_ERROR;
 use windows::Win32::Storage::FileSystem::{
-    MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    MOVE_FILE_FLAGS, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
 };
 use windows::core::HSTRING;
 
@@ -32,6 +34,35 @@ pub struct Config {
     /// 設定分頁「介面」；舊設定檔沒有此欄位（或缺其中一項）時用預設值。
     #[serde(default)]
     pub ui: UiSettings,
+    /// 角色自訂名稱；舊設定檔沒有此欄位，視為都沒有名稱。
+    #[serde(default)]
+    pub characters: CharacterNames,
+}
+
+/// 角色自訂名稱：區服 → 角色 id（16 位 hex，protocols §7.3）→ 名稱。遊戲資料夾裡沒有角色名稱，只能由使用者命名。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CharacterNames {
+    #[serde(default)]
+    pub global: BTreeMap<String, String>,
+    #[serde(default)]
+    pub tw: BTreeMap<String, String>,
+}
+
+impl CharacterNames {
+    pub fn get(&self, region: Region) -> &BTreeMap<String, String> {
+        match region {
+            Region::Global => &self.global,
+            Region::Tw => &self.tw,
+        }
+    }
+
+    pub fn get_mut(&mut self, region: Region) -> &mut BTreeMap<String, String> {
+        match region {
+            Region::Global => &mut self.global,
+            Region::Tw => &mut self.tw,
+        }
+    }
 }
 
 /// 設定分頁「介面」的兩個選項。
@@ -303,6 +334,18 @@ impl AppPaths {
     pub fn profile_dir(&self, profile_id: &str) -> PathBuf {
         self.root.join("profiles").join(profile_id)
     }
+    /// `characters/<global|tw>/`：角色資料備份（protocols §7、`characters`）。
+    pub fn character_backups_dir(&self, region: Region) -> PathBuf {
+        let name = match region {
+            Region::Global => "global",
+            Region::Tw => "tw",
+        };
+        self.root.join("characters").join(name)
+    }
+    /// `state/character_usage.json`：角色「最後由哪個帳號使用」的標記（`characters::usage`）。
+    pub fn character_usage_file(&self) -> PathBuf {
+        self.root.join("state").join("character_usage.json")
+    }
     /// 下載與解壓的暫存區；與正式目錄同一磁碟，rename 才是原子的。
     pub fn staging_dir(&self) -> PathBuf {
         self.root.join("staging")
@@ -344,8 +387,17 @@ pub fn write_json_atomic<T: Serialize>(file: &Path, value: &T) -> AppResult<()> 
 /// 先寫同資料夾的唯一暫存檔並 `sync_all`，再以 [`replace_write_through`] 取代 `target`；失敗時刪掉暫存檔，
 /// `target` 不變。
 pub(crate) fn write_replace(target: &Path, bytes: &[u8]) -> io::Result<()> {
+    replace_via_temp(target, bytes, None)
+}
+
+/// 同 [`write_replace`]，但取代後的修改時間是 `modified`（角色資料檔沿用來源的時間，protocols §7.3）。
+pub(crate) fn write_replace_modified(target: &Path, bytes: &[u8], modified: SystemTime) -> io::Result<()> {
+    replace_via_temp(target, bytes, Some(modified))
+}
+
+fn replace_via_temp(target: &Path, bytes: &[u8], modified: Option<SystemTime>) -> io::Result<()> {
     let tmp = with_suffix(target, &format!(".{}{TEMP_SUFFIX}", uuid::Uuid::new_v4().simple()));
-    let result = write_new(&tmp, bytes).and_then(|()| replace_write_through(&tmp, target));
+    let result = write_new_at(&tmp, bytes, modified).and_then(|()| replace_write_through(&tmp, target));
     if result.is_err() {
         // quality-allow: 暫存檔清理是 best-effort，刪不掉只留下唯一名稱的暫存檔，原檔不變
         let _ = fs::remove_file(&tmp);
@@ -355,8 +407,16 @@ pub(crate) fn write_replace(target: &Path, bytes: &[u8]) -> io::Result<()> {
 
 /// 建立新檔（已存在就失敗）、寫入並 `sync_all`。
 pub(crate) fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_new_at(path, bytes, None)
+}
+
+/// 同 [`write_new`]；`modified` 有值時在寫完、`sync_all` 之前設定修改時間（角色資料備份保留原檔時間）。
+pub(crate) fn write_new_at(path: &Path, bytes: &[u8], modified: Option<SystemTime>) -> io::Result<()> {
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
     file.write_all(bytes)?;
+    if let Some(modified) = modified {
+        file.set_modified(modified)?;
+    }
     file.sync_all()
 }
 
@@ -364,11 +424,22 @@ pub(crate) fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
 /// 磁碟後才返回（`fs::rename` 返回時改名可能還只在快取，斷電會遺失）。不 flush `from` 的資料：呼叫端須先
 /// 對它 `sync_all`。[`write_replace`] 與 `.ver` 的 commit 點（`patch::zipatch`）都經這裡。
 pub(crate) fn replace_write_through(from: &Path, to: &Path) -> io::Result<()> {
+    move_file(from, to, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)
+}
+
+/// 把資料夾 `from` 改名成 `to`（`to` 已存在就失敗），改名寫入磁碟後才返回。目錄不能用
+/// `MOVEFILE_REPLACE_EXISTING`，只帶 `MOVEFILE_WRITE_THROUGH`。角色備份的暫存資料夾改成正式名稱經這裡：
+/// 之後就要覆寫角色檔，備份的名稱必須先落盤。
+pub(crate) fn rename_dir_write_through(from: &Path, to: &Path) -> io::Result<()> {
+    move_file(from, to, MOVEFILE_WRITE_THROUGH)
+}
+
+fn move_file(from: &Path, to: &Path, flags: MOVE_FILE_FLAGS) -> io::Result<()> {
     let from = HSTRING::from(from);
     let to = HSTRING::from(to);
     // SAFETY: 兩個路徑都是以 0 結尾（HSTRING 保證）、在呼叫期間存活的 UTF-16 字串。
     // quality-allow: Win32 FFI，MoveFileExW 沒有安全包裝
-    let moved = unsafe { MoveFileExW(&from, &to, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) };
+    let moved = unsafe { MoveFileExW(&from, &to, flags) };
     // HRESULT_FROM_WIN32 還原成 Win32 錯誤碼，`io::Error` 的 kind 與訊息才與 std 的檔案操作一致。
     moved.map_err(|e| match WIN32_ERROR::from_error(&e) {
         Some(code) => io::Error::from_raw_os_error(code.0 as i32),

@@ -133,6 +133,25 @@ pub enum AppError {
     #[error("只能開啟{region}官方網站的消息連結")]
     NewsLinkRejected { region: Region },
 
+    /// 角色資料寫入互斥（protocols §7.3）：同區服有遊戲或官方啟動器在執行。
+    #[error("{region} 的遊戲或官方啟動器正在執行，請先關閉再寫入角色資料")]
+    CharacterDataInUse { region: Region },
+    /// 前端傳來的角色 id 或備份 id 不符格式（不回顯原文）。
+    #[error("角色或備份的識別碼格式不符")]
+    InvalidCharacterId,
+    #[error("轉移的來源與目標是同一個角色")]
+    TransferSameCharacter,
+    /// 角色資料夾或要寫的檔是 symlink／junction：備份不收連結，寫入會把連結換成一般檔，所以不寫。
+    #[error("{path} 是連結（symlink 或 junction），不寫入角色資料；請改成一般檔案或資料夾後再試")]
+    CharacterLinked { path: String },
+    /// 角色資料寫到一半失敗，已以寫入前的自動備份恢復成原狀。
+    #[error("寫入角色資料失敗，已恢復成寫入前（{reason}）")]
+    CharacterWriteRolledBack { reason: String },
+    /// 寫到一半失敗、恢復也失敗：寫入前的自動備份改成手動備份（不會被保留規則刪掉）；`kept` 說明改名是否成功。
+    /// `created` 是這次新建、可能留在角色資料夾的檔名（空字串＝沒有）。
+    #[error("寫入角色資料失敗，也無法自動恢復（{reason}）；寫入前的備份 {backup} {kept}，請用「還原」恢復{created}")]
+    CharacterRollbackFailed { reason: String, backup: String, kept: String, created: String },
+
     #[error("檔案操作失敗（{context}）：{message}")]
     Io { context: String, message: String },
     #[error("憑證存取失敗（{context}）")]

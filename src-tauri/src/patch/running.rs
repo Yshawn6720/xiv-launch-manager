@@ -1,7 +1,8 @@
 //! 程序執行判定（主 note「遊戲執行判定」、protocols §3 例外）：以完整映像路徑比對，不按程序名。
 //! 遊戲：目標安裝的 `game\ffxiv_dx11.exe` 與 `boot\` 下的執行檔，只用於更新互斥；ACT：設定的執行檔，
-//! 只用於「已在執行就不再開」與畫面狀態。都不用於查找、等待或結束程序。唯一按名稱判定的是
-//! [`any_named`]：ACT 一鍵設定前確認沒有任何 ACT 在跑（protocols §6.4）。
+//! 只用於「已在執行就不再開」與畫面狀態。都不用於查找、等待或結束程序。按名稱判定的有兩處：
+//! [`any_named`]：ACT 一鍵設定前確認沒有任何 ACT 在跑（protocols §6.4）；[`game_clients`]：角色資料寫入互斥與
+//! 使用標記（protocols §7.3），名稱為 `ffxiv_dx11.exe` 且不是另一區服遊戲執行檔的程序都算。
 //!
 //! 開不起來的程序（權限不足，例如其他使用者的程序）拿不到映像路徑：映像名稱與目標執行檔同名時
 //! 保守視為執行中（寧可誤擋更新，也不在遊戲執行時寫入；ACT 寧可不開，也不多開一個）；名稱不同的
@@ -54,28 +55,38 @@ pub(crate) fn any_named(names: &HashSet<String>) -> AppResult<bool> {
     Ok(processes()?.iter().any(|p| names.contains(&p.name.to_lowercase())))
 }
 
+/// 映像名稱為 `ffxiv_dx11.exe`、且完整映像路徑不是 `exclude`（其他區服設定的遊戲執行檔）之一的程序 pid。
+/// 查不到映像路徑的同名程序算在內（見模組說明）；`exclude` 裡解析不了的路徑（檔案不存在）不排除任何程序。
+pub(crate) fn game_clients(exclude: &[PathBuf]) -> AppResult<Vec<u32>> {
+    let exclude: HashSet<String> = exclude.iter().filter_map(|exe| normalize_path(exe).ok()).collect();
+    Ok(processes()?
+        .into_iter()
+        .filter(|p| p.name.eq_ignore_ascii_case(GAME_EXE))
+        .filter(|p| image_matches(p.pid, |image| !exclude.contains(image)))
+        .map(|p| p.pid)
+        .collect())
+}
+
 /// 映像名稱（小寫）在 `names` 中的程序，是否有任一的完整映像路徑（[`comparable`] 形式）符合 `matches`。
 /// 查不到或解析不了映像路徑的同名程序算符合（見模組說明）。
 fn any_image_matches(names: &HashSet<String>, matches: impl Fn(&str) -> bool) -> AppResult<bool> {
-    for process in processes()? {
-        if !names.contains(&process.name.to_lowercase()) {
-            continue;
-        }
-        let hit = match image_path(process.pid) {
-            Ok(Some(image)) => match fs::canonicalize(image) {
-                Ok(image) => matches(&comparable(&image)),
-                // 映像路徑解析不了（例如位於已中斷的網路磁碟）：無法確認，保守視為符合。
-                Err(_) => true,
-            },
-            // 列舉後已結束。
-            Ok(None) => false,
+    Ok(processes()?
+        .iter()
+        .any(|p| names.contains(&p.name.to_lowercase()) && image_matches(p.pid, &matches)))
+}
+
+/// `pid` 的完整映像路徑（[`comparable`] 形式）是否符合 `matches`；查不到或解析不了算符合，列舉後已結束算不符合。
+fn image_matches(pid: u32, matches: impl Fn(&str) -> bool) -> bool {
+    match image_path(pid) {
+        Ok(Some(image)) => match fs::canonicalize(image) {
+            Ok(image) => matches(&comparable(&image)),
+            // 映像路徑解析不了（例如位於已中斷的網路磁碟）：無法確認，保守視為符合。
             Err(_) => true,
-        };
-        if hit {
-            return Ok(true);
-        }
+        },
+        // 列舉後已結束。
+        Ok(None) => false,
+        Err(_) => true,
     }
-    Ok(false)
 }
 
 /// 比對用的路徑形式：解析成最終路徑（展開 junction／symlink／8.3 短名、取實際大小寫），再經
@@ -259,6 +270,10 @@ pub(crate) mod test_support {
                 .spawn()
                 .expect("start fake process");
             Self(child)
+        }
+
+        pub(crate) fn pid(&self) -> u32 {
+            self.0.id()
         }
     }
 

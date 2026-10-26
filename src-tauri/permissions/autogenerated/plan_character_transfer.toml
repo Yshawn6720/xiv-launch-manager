@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-plan-character-transfer"
+description = "Enables the plan_character_transfer command without any pre-configured scope."
+commands.allow = ["plan_character_transfer"]
+
+[[permission]]
+identifier = "deny-plan-character-transfer"
+description = "Denies the plan_character_transfer command without any pre-configured scope."
+commands.deny = ["plan_character_transfer"]
