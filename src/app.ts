@@ -15,7 +15,8 @@ import { resetSpeed } from "./progress";
 
 /**
  * 主題的鏡像（localStorage）：程式一開就套用、不等讀設定（第一次 render 之前），深淺不會閃一下；render() 讀到
- * 設定後以設定為準。只有強制深色／淺色時設 data-theme；跟隨系統時拿掉，styles.css 的 color-scheme 跟系統。
+ * 設定後以設定為準。還沒有鏡像（新安裝）時先用預設的深色，同 Rust `Theme` 的預設。只有強制深色／淺色時設
+ * data-theme；跟隨系統時拿掉，styles.css 的 color-scheme 跟系統。
  */
 const THEME_KEY = "xlm.theme";
 const THEMES: readonly Theme[] = ["system", "dark", "light"];
@@ -27,7 +28,7 @@ export function applyTheme(theme: Theme): void {
 }
 
 const mirroredTheme = localStorage.getItem(THEME_KEY);
-applyTheme(THEMES.find((t) => t === mirroredTheme) ?? "system");
+applyTheme(THEMES.find((t) => t === mirroredTheme) ?? "dark");
 
 // ---------- DOM、訊息列、動作與共用設定 ----------
 

@@ -490,7 +490,7 @@ fn parse_oauth_reply(reply: &str) -> AppResult<OauthResult> {
 }
 
 /// Session 註冊 body：boot 檔雜湊行，接著每個 ex{1..=max} 一行版本。`exN.ver` 缺失即
-/// [`AppError::VersionFileMissing`]，不以基礎版本兜底（主 note「版本來源」）。
+/// [`AppError::VersionFileMissing`]，不以基礎版本兜底。
 fn version_report(install: &Path, max_expansion: u8) -> AppResult<String> {
     let boot_dir = install.join("boot");
     let mut report = game::boot_version(install)?;

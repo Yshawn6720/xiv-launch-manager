@@ -1,17 +1,20 @@
 // 宣告 app commands 後，每個 command 都要經 capability 授權：主視窗與 tw-recaptcha 視窗
-// 因此各自只拿到自己需要的 command（主 note「台服 reCAPTCHA」）。
+// 因此各自只拿到自己需要的 command。
 const COMMANDS: &[&str] = &[
     "get_config",
     "set_game_path",
     "set_theme",
     "set_after_launch",
+    "set_external_pack",
     "detect_game_path",
     "detect_dalamud_data",
     "get_server_status",
     "open_folder",
+    "pick_folder",
     "get_tw_news",
     "get_global_news",
     "open_news",
+    "open_shop",
     "save_account",
     "set_account_profile",
     "import_detected_profile",

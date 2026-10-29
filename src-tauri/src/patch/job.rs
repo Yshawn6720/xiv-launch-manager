@@ -1,4 +1,4 @@
-//! 國際服提權 helper 的工作檔（主 note「信任邊界（方案 1）」）。
+//! 國際服提權 helper 的工作檔。
 //!
 //! 一般權限的 parent 以 [`write_job`] 建立 `job.json`，把它的 SHA-256 放在 helper 的命令列；
 //! helper 以 [`read_job`] 拒絕共用寫入開啟、核對 SHA-256 後才採信內容。國際服的區塊 hash 取自

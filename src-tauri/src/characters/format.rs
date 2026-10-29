@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn incomplete_binary_is_rejected() {
-        // 長度與檔頭不符（pre 複審實測：同機有比最大長度＋32 多出 bytes 的檔）。
+        // 長度與檔頭不符（實測：同機有比最大長度＋32 多出 bytes 的檔）。
         assert!(binary_prefix(&binary(7, 0x100, 0x10, 0x100 + 32 + 5)).is_err());
         assert!(binary_prefix(&binary(7, 0x100, 0x10, 0x100 + 31)).is_err());
         // 內容長度超過上限。

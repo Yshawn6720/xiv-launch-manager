@@ -93,6 +93,12 @@ export function remember(accountId: string, text: string, ok: boolean): void {
   lastResults.set(accountId, { text, ok, at: new Date() });
 }
 
+/**
+ * 繁中服帳號最近一次「成功」登入回應的剩餘遊戲時間文字（protocols §2.1）與取得時間；只存在記憶體，重開程式即清空。
+ * 選中該帳號時顯示在頁首；之後登入失敗不清掉，附取得時間，與側欄「上次」那行的時間分得開。
+ */
+const playTimes = new Map<string, { text: string; at: Date }>();
+
 /** 兩服伺服器狀態；null＝本次程式執行尚未取得。 */
 const serverStatus: Record<Region, ServerState | null> = { global: null, tw: null };
 let statusSeq = 0;
@@ -375,6 +381,21 @@ function addAvatar(): HTMLElement {
   return h("span", { class: "avatar avatar-add", "aria-hidden": "true" }, "＋");
 }
 
+/**
+ * 頁首的「遊戲時間」標籤：時鐘圖示、「遊戲時間」、剩餘時間（粗體）與取得時間各一段，同一行不換行。完整說明放 title。
+ */
+function playTimeTag(p: { text: string; at: Date }): HTMLElement {
+  const at = hhmm(p.at);
+  return h(
+    "span",
+    { class: "play-time", title: `遊戲時間：${p.text}（${at} 登入時繁中服回報的值）` },
+    h("span", { class: "play-time-icon", "aria-hidden": "true" }),
+    h("span", {}, "遊戲時間"),
+    h("strong", { class: "play-time-value" }, p.text),
+    h("span", {}, `${at} 登入`),
+  );
+}
+
 /** 左欄：兩服伺服器狀態與依區服分組的帳號清單（點選即切換右側登入表單的帳號），最下方是目前區服的官方消息。 */
 function accountPane(selected: AccountView | null): HTMLElement {
   // 伺服器狀態：有該服分組時接在分組標題右側（標題已寫區服，這裡只寫「伺服器」）；
@@ -459,11 +480,19 @@ export function renderLogin(): void {
   const errorFor = (f: LoginField): string | null => (error?.field === f ? error.text : null);
   const bound = a ? config.profiles.find((p) => p.id === a.profileId) : undefined;
 
-  // 內容區頂部的頁首：選中的帳號（新增模式為「新增帳號」）與同一行的區服 badge（標題的屬性）一組；
-  // 已存帳號的右側是「⋯」選單：重新命名｜檢查遊戲更新或遊戲檔完整性（依區服）、開啟遊戲設定資料夾｜刪除帳號。新增模式沒有選單。
+  // 內容區頂部的頁首：選中的帳號（新增模式為「新增帳號」）與同一行的區服 badge（標題的屬性）一組，繁中服登入成功過的帳號
+  // 再接「遊戲時間」標籤（protocols §2.1）；已存帳號最右邊是「⋯」選單：重新命名｜檢查遊戲更新或遊戲檔完整性（依區服）、
+  // 開啟遊戲設定資料夾｜刪除帳號。新增模式沒有選單。水晶商城在側欄消息標題列（news.ts）。
   const title = h("h2", { class: "login-title", id: "login-title" }, a ? accountLabel(a) : "新增帳號");
   const regionBadge = h("span");
-  const identity = h("div", { class: "login-identity" }, title, regionBadge);
+  const playTime = a ? playTimes.get(a.id) : undefined;
+  const identity = h(
+    "div",
+    { class: "login-identity" },
+    title,
+    regionBadge,
+    ...(playTime ? [playTimeTag(playTime)] : []),
+  );
   const head = h("div", { class: "login-head" }, identity);
   loginMenu = null;
   if (a) {
@@ -1077,10 +1106,11 @@ export function renderLogin(): void {
           ? `・${dalamudVersionLabel(d.region, r.dalamudVersion, await installedDalamudVersion(d.region, r.dalamudVersion))}`
           : "";
         remember(id, `已啟動${loaded}`, true);
+        if (r.playTime !== null) playTimes.set(id, { text: r.playTime, at: new Date() });
         if (d.region === "global") clearReloginPending();
         const started = `已啟動 ${label}（pid ${r.pid}）${loaded}`;
-        // 遊戲已啟動，但 ACT 沒開起來或 ACT 連動沒更新：附上原因，不用錯誤樣式。
-        const notes = [r.actWarning, r.actTargetWarning].filter((w): w is string => w !== null);
+        // 遊戲已啟動，但 ACT 沒開起來、ACT 連動沒更新，或外部包沒套用：附上原因，不用錯誤樣式。
+        const notes = [r.actWarning, r.actTargetWarning, r.packWarning].filter((w): w is string => w !== null);
         return notes.length ? { text: [started, ...notes].join("；"), kind: "" } : started;
       } catch (e) {
         const raw = errorText(e);

@@ -52,7 +52,7 @@ pub enum AppError {
         patch_count: usize,
         total_bytes: u64,
     },
-    /// 更新判斷需要的 `.ver` 缺失：不以基礎版本兜底要清單（主 note「版本來源」）。
+    /// 更新判斷需要的 `.ver` 缺失：不以基礎版本兜底要清單。
     #[error("找不到 {region} 版本檔 {path}，無法判斷是否需要更新；請先用 {region} 官方啟動器更新或修復")]
     VersionFileMissing { region: Region, path: String },
     /// 該安裝有套用途中中斷的遊戲更新（dirty 標記）；使用者修復後在本程式確認清除。
@@ -151,6 +151,16 @@ pub enum AppError {
     /// `created` 是這次新建、可能留在角色資料夾的檔名（空字串＝沒有）。
     #[error("寫入角色資料失敗，也無法自動恢復（{reason}）；寫入前的備份 {backup} {kept}，請用「還原」恢復{created}")]
     CharacterRollbackFailed { reason: String, backup: String, kept: String, created: String },
+
+    /// 外部包資料夾不能用（protocols §1.6）；reason 是給使用者的說明。
+    #[error("外部包資料夾無效：{reason}")]
+    ExternalPackInvalid { reason: String },
+    /// 開啟外部包前沒有確認風險說明（protocols §1.6「確認」）。
+    #[error("開啟外部包前，請先閱讀並確認風險說明")]
+    ExternalPackRiskNotAccepted,
+    /// 影子資料夾建立失敗（protocols §1.6「重建」）；reason 是給使用者的說明。
+    #[error("無法建立影子資料夾（{reason}）")]
+    ShadowBuild { reason: String },
 
     #[error("檔案操作失敗（{context}）：{message}")]
     Io { context: String, message: String },

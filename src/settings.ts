@@ -60,7 +60,7 @@ const SAFETY_GROUPS: readonly { title: string; items: readonly SafetyItem[] }[] 
           "核對只能確認檔案與來源公布的一致、下載途中沒有損壞或被竄改，不能證明來源本身安全",
         ],
       ],
-      "本程式以一般使用者權限執行，不要求系統管理員。國際服遊戲更新只在安裝資料夾受保護（一般權限不能修改，例如裝在 Program Files）時才跳 UAC：同意後執行的是本程式自己的更新 helper，只負責核對與套用更新檔、寫入版本檔，不開視窗，完成即結束；helper 發現安裝資料夾一般權限就能修改時不寫入。國際服安裝資料夾本程式就能修改時，以及繁中服，更新都在本程式內套用，不跳 UAC。",
+      "本程式以一般使用者權限執行，不要求系統管理員。國際服遊戲更新只在安裝資料夾受保護（一般權限不能修改，例如裝在 Program Files）時才跳 UAC：同意後執行的是本程式自己的更新 helper，只負責核對與套用更新檔、寫入版本檔，不開視窗，完成即結束；helper 發現安裝資料夾一般權限就能修改時不寫入。以一般身分執行、且國際服安裝資料夾本程式就能修改時，以及繁中服，更新都在本程式內套用，不跳 UAC；以系統管理員身分執行本程式時，國際服更新一律交給 helper（不跳 UAC），一般權限就能修改的安裝不會更新。",
       "國際服的「檢查遊戲檔完整性」只讀取比對，不修改遊戲檔。",
       "請只從官方 GitHub Releases（github.com/Yshawn6720/xiv-launch-manager/releases）下載本程式；其他來源的檔案可能被改過。",
     ],
@@ -224,6 +224,132 @@ function uiBlock(): HTMLElement {
   );
 }
 
+/** 開啟國際服外部包前的風險說明（只問一次，確認後記在設定）。 */
+const EXTERNAL_PACK_RISK =
+  "國際服外部包是對遊戲用戶端的非官方修改，違反 Square Enix 使用者協議，可能導致帳號被處分。\n\n" +
+  "是否使用、以及因此造成的帳號處分或其他損失，由你自行承擔。確認後不再詢問。\n\n" +
+  "確定要開啟？";
+
+/** 「國際服外部包」的說明段落：粗體開頭＋內文。 */
+function packNote(lead: string, text: string): HTMLElement {
+  return h("p", { class: "hint" }, h("strong", {}, lead), text);
+}
+
+/**
+ * 「國際服外部包」（protocols §1.6）：功用一句、資料夾列（同遊戲路徑的輸入＋選擇資料夾＋儲存）、開關，以及收起的「說明」
+ * （放什麼、怎麼運作、限制與風險）。「選擇資料夾」同「自動偵測」只填入輸入框，仍要按儲存。
+ * 開關以輸入框目前的資料夾送出；第一次開啟先確認風險，不同意就不送出、開關退回關閉。失敗由 run() 顯示原因並重繪，
+ * 開關回到已存的狀態。
+ */
+function externalPackBlock(): HTMLElement {
+  const pack = config.externalPack;
+  const saved = pack.dir ?? "";
+  const input = h("input", {
+    value: saved,
+    "aria-label": "國際服外部包資料夾",
+    placeholder: "例：D:\\FFXIV 外部包",
+    autocomplete: "off",
+    spellcheck: "false",
+  });
+  const pick = h("button", { class: "secondary", type: "button" }, "選擇資料夾");
+  const save = h("button", { class: "primary" }, "儲存");
+  const toggleId = "settings-external-pack";
+  const toggle = h("input", { id: toggleId, type: "checkbox" });
+  toggle.checked = pack.enabled;
+  // 沒填資料夾時不能開啟；已開啟時照樣可以關（資料夾被移走也能關）。
+  const sync = () => {
+    const dir = input.value.trim();
+    save.disabled = dir === saved;
+    toggle.disabled = !pack.enabled && dir === "";
+  };
+  sync();
+  input.addEventListener("input", sync);
+  // 不走 run()：不重繪（輸入框裡還沒儲存的內容會不見），失敗只顯示訊息（同 openFolder）。對話框開著時按鈕停用，免得連點開出第二個。
+  pick.addEventListener("click", () => {
+    pick.disabled = true;
+    api
+      .pickFolder("選擇國際服外部包資料夾", input.value.trim() || null)
+      .then(
+        (dir) => {
+          if (dir === null) return;
+          input.value = dir;
+          sync();
+          save.focus();
+        },
+        (e: unknown) => say(errorText(e), "error"),
+      )
+      .finally(() => {
+        pick.disabled = false;
+      });
+  });
+  save.addEventListener("click", () =>
+    run("儲存國際服外部包資料夾", () => api.setExternalPack(input.value.trim() || null, pack.enabled, false)),
+  );
+  toggle.addEventListener("change", () => {
+    const on = toggle.checked;
+    const acceptRisk = on && !pack.riskAccepted;
+    if (acceptRisk && !confirm(EXTERNAL_PACK_RISK)) {
+      toggle.checked = false;
+      return;
+    }
+    void run(on ? "開啟國際服外部包" : "關閉國際服外部包", async () => {
+      await api.setExternalPack(input.value.trim() || null, on, acceptRisk);
+      return on ? "已開啟國際服外部包，下次登入國際服時套用" : "已關閉國際服外部包，國際服改以原版遊戲啟動";
+    }).then(() => document.getElementById(toggleId)?.focus());
+  });
+  const guide = h(
+    "details",
+    { class: "editor-advanced pack-guide" },
+    h("summary", {}, "說明：資料夾要放什麼、怎麼運作"),
+    h(
+      "div",
+      { class: "editor-advanced-body" },
+      packNote(
+        "要放什麼：",
+        "把要替換的 sqpack 檔直接放在這個資料夾（不用子資料夾），檔名和遊戲 game\\sqpack\\ffxiv\\ 裡的官方檔相同，例如字體包 000000.win32.dat0、.index、.index2，漢化包 0a0000.win32.dat0、.index、.index2。每組至少要有 .dat0 和 .index，其他檔案不理會。",
+      ),
+      packNote(
+        "怎麼運作：",
+        "開啟後登入國際服時，本程式在遊戲資料夾旁建一個「影子資料夾」（xiv-launch-manager-shadow），以連結組合官方檔與外部包，再從那裡啟動遊戲。不另佔遊戲大小的空間；遊戲更新、檢查遊戲檔完整性照常。",
+      ),
+      packNote(
+        "重建與 UAC：",
+        "登入時檢查影子資料夾，第一次使用或檔案有變時才重建；需要重建且遊戲裝在 Program Files 等受保護位置時，Windows 才會詢問是否允許（UAC），按「否」這次就以原版遊戲啟動。已有影子的遊戲在執行時沿用，不重建。",
+      ),
+      packNote(
+        "遊戲更新後：",
+        "外部包是對某一版官方檔做的。版本不符時這次以原版遊戲啟動並提示「外部包已過期」，請用新版官方檔重新產生外部包。",
+      ),
+      packNote(
+        "限制：",
+        "外部包資料夾要和遊戲在同一個磁碟，且不能與遊戲資料夾或影子資料夾重疊（不能放在裡面，也不能包含它們）。不要用其他工具修改影子資料夾裡的檔案：它們連到遊戲原檔或外部包，修改會直接影響來源。關閉後影子資料夾會留著；要刪請用檔案總管，不要用會跟著連結刪除內容的工具。",
+      ),
+      packNote("風險：", "非官方修改違反 Square Enix 使用者協議，可能導致帳號被處分；第一次開啟時會再請你確認。"),
+    ),
+  );
+  return h(
+    "section",
+    { class: "settings-block" },
+    h("h3", { class: "section-title" }, "國際服外部包"),
+    h(
+      "p",
+      { class: "hint" },
+      "讓國際服用上字體包、漢化包（例如 GP 漢化器產生的檔案），遊戲資料夾裡的官方檔案不必改動。",
+    ),
+    // 與上方「遊戲路徑」同一種列：區服 badge＋輸入框＋按鈕＋儲存（「選擇資料夾」在「自動偵測」的位置）。
+    h(
+      "div",
+      { class: "setting-row path-setting" },
+      h("span", { class: "badge global" }, regionLabel("global")),
+      input,
+      pick,
+      save,
+    ),
+    h("div", { class: "setting-row" }, h("label", { class: "check" }, toggle, "登入國際服時套用外部包")),
+    guide,
+  );
+}
+
 export function renderSettings(): void {
   const root = section("settings");
   const rows = REGIONS.map((region) => {
@@ -268,6 +394,7 @@ export function renderSettings(): void {
       h("p", { class: "hint" }, "填遊戲根目錄（含 boot 與 game 資料夾的那一層）。"),
       ...rows,
     ),
+    externalPackBlock(),
     h(
       "section",
       { class: "settings-block" },

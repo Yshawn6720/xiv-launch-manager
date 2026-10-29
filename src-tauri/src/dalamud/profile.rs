@@ -1,4 +1,4 @@
-//! 衛月 profile 目錄與佔用紀錄（主 note「衛月：來源 × 版本 × Profile」「程序與狀態」、protocols §3）。
+//! 衛月 profile 目錄與佔用紀錄（protocols §3）。
 //!
 //! 佔用紀錄 `state/profiles_running.json`：profile_id → `[{pid, created}, …]`（共用時多筆，protocols §3）；
 //! `state/accounts_running.json`：account_id → `{pid, created}`（帶不帶衛月都記）。pid 會被系統重用，所以判斷

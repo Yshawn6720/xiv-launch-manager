@@ -1,4 +1,4 @@
-//! 繁中服登入確認對話框與 reCAPTCHA token（protocols §2.1 第 1 步；主 note「台服 reCAPTCHA」）。
+//! 繁中服登入確認對話框與 reCAPTCHA token（protocols §2.1 第 1 步）。
 //!
 //! 流程：開 `tw-recaptcha` 視窗（about:blank，置中、取得焦點）→ 在該 WebView2 攔截
 //! `https://launcher.ffxiv.com.tw/index.html` 改回內建頁（填入帳號名稱、是否在頁面輸入 OTP）→ 確認攔截生效才導航 →

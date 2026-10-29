@@ -1,8 +1,8 @@
-//! 依清單順序套用已下載的 patch（主 note「流程／套用」）；台服程序內套用與國際服提權 helper 共用。
+//! 依清單順序套用已下載的 patch；台服程序內套用與國際服提權 helper 共用。
 //!
 //! 每個 patch：以拒絕共用寫入開啟（保持到該 patch 寫完 `.ver`）→ 區塊 SHA1 核對 → 回檔頭 →
 //! ZiPatch 掃描 → 再查一次遊戲是否執行 → 套用 → 寫 `.ver`。核對、掃描、套用都用同一個 handle，
-//! 不依路徑重開；成功後不刪 patch 檔（由 parent 刪）。
+//! 不依路徑重開；成功後不刪 patch 檔（由 parent 刪）。國際服整批成功後再寫 `.bck`。
 
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom};
@@ -13,9 +13,11 @@ use serde::{Deserialize, Serialize};
 use windows::Win32::Storage::FileSystem::FILE_SHARE_READ;
 
 use crate::error::{AppError, AppResult};
+use crate::game::MAX_EXPANSION;
 use crate::patch::job::JobPatch;
 use crate::patch::zipatch::{self, ScannedPatch};
 use crate::patch::{list, running};
+use crate::region::Region;
 
 /// 套用失敗的分類，決定呼叫端是否保留 dirty 標記。
 #[derive(Debug)]
@@ -24,7 +26,7 @@ pub enum ApplyFailure {
     /// 遇共用違規），之前的 patch 都已完整套用並寫好 `.ver`：遊戲目錄處於某個完整版本，呼叫端可清除
     /// dirty 標記。多個 patch 時不代表遊戲目錄完全未變。
     BeforeWrite(AppError),
-    /// 已開始寫入遊戲目錄（套用或寫 `.ver` 失敗，含已寫入後的共用違規）——保留 dirty 標記。
+    /// 已開始寫入遊戲目錄（套用或寫 `.ver`、`.bck` 失敗，含已寫入後的共用違規）——保留 dirty 標記。
     AfterWrite(AppError),
 }
 
@@ -40,8 +42,10 @@ pub struct ApplyProgress {
 
 /// 依序套用 `patches` 到 `install`（安裝根目錄；套用根目錄一律 `{install}\game`）。`cancelled`
 /// 只在 patch 與 patch 之間檢查（套用中不中斷）。版本逐 patch 推進：每個 patch 套用成功後才寫它的
-/// `.ver`，失敗即停止，之後的 patch 不碰。
+/// `.ver`，失敗即停止，之後的 patch 不碰。國際服整批都成功後，每個存在的 `.ver` 原樣寫成同目錄的 `.bck`
+/// （protocols §5.1）；失敗或取消時不寫。
 pub fn apply_patches(
+    region: Region,
     install: &Path,
     patches: &[JobPatch],
     progress: &mut dyn FnMut(ApplyProgress),
@@ -69,6 +73,17 @@ pub fn apply_patches(
         scanned.apply(&mut report)?;
         zipatch::write_version(&game_root, patch.repo, &patch.version_id)
             .map_err(ApplyFailure::AfterWrite)?;
+    }
+    match region {
+        Region::Global => {
+            let repos = std::iter::once(list::Repo::Game)
+                .chain((1..=MAX_EXPANSION).map(list::Repo::Expansion));
+            for repo in repos {
+                zipatch::copy_version_to_backup(&game_root, repo).map_err(ApplyFailure::AfterWrite)?;
+            }
+        }
+        // 沒有查到台服官方的 `.bck` 規則（protocols §5.1）。
+        Region::Tw => {}
     }
     Ok(())
 }
@@ -114,6 +129,11 @@ mod tests {
     const EX1_HASH: &str = "625499a52faf29e527543ee969e17ff9a81edcb6";
     const DAT: &str = r"game\sqpack\ex1\030100.win32.dat0";
     const EX1_VER: &str = r"game\sqpack\ex1\ex1.ver";
+    const EX1_BCK: &str = r"game\sqpack\ex1\ex1.bck";
+    const GAME_VER: &str = r"game\ffxivgame.ver";
+    const GAME_BCK: &str = r"game\ffxivgame.bck";
+    const GAME_VERSION: &str = "2026.10.16.0000.0000";
+    const STALE_VERSION: &str = "2026.09.15.0000.0000";
 
     /// 假安裝（`game\sqpack\ex1` 預建）與放 patch 檔的獨立目錄（不在安裝內，快照不含它）。
     struct Fixture {
@@ -145,8 +165,9 @@ mod tests {
             self.install.path().join(rel)
         }
 
+        /// 台服套用（不寫 `.bck`）；套用本身與區服無關的測試都走這裡。
         fn run(&self, patches: &[JobPatch]) -> (Result<(), ApplyFailure>, Vec<ApplyProgress>) {
-            self.run_with(patches, &|| false)
+            self.run_in(Region::Tw, patches, &|| false)
         }
 
         fn run_with(
@@ -154,9 +175,34 @@ mod tests {
             patches: &[JobPatch],
             cancelled: &dyn Fn() -> bool,
         ) -> (Result<(), ApplyFailure>, Vec<ApplyProgress>) {
+            self.run_in(Region::Tw, patches, cancelled)
+        }
+
+        fn run_in(
+            &self,
+            region: Region,
+            patches: &[JobPatch],
+            cancelled: &dyn Fn() -> bool,
+        ) -> (Result<(), ApplyFailure>, Vec<ApplyProgress>) {
             let mut seen = Vec::new();
-            let result = apply_patches(self.install.path(), patches, &mut |p| seen.push(p), cancelled);
+            let result =
+                apply_patches(region, self.install.path(), patches, &mut |p| seen.push(p), cancelled);
             (result, seen)
+        }
+
+        /// 安裝內每個 `.bck` 的相對路徑與內容（依路徑排序）。
+        fn backups(&self) -> Vec<(PathBuf, Vec<u8>)> {
+            self.snapshot()
+                .into_iter()
+                .filter(|(rel, _)| rel.extension().is_some_and(|ext| ext == "bck"))
+                .map(|(rel, data)| (rel, data.expect("`.bck` 是檔案")))
+                .collect()
+        }
+
+        /// 基本遊戲已有 `.ver`（本批沒有它的 patch）與較舊的 `.bck`；ex1 還沒有 `.ver`，由本批 patch 寫出。
+        fn seed_versions(&self) {
+            fs::write(self.path(GAME_VER), GAME_VERSION).expect("seed ver");
+            fs::write(self.path(GAME_BCK), STALE_VERSION).expect("seed bck");
         }
 
         /// 安裝目錄內所有項目與檔案內容。
@@ -276,6 +322,73 @@ mod tests {
         assert!(fx.path(DAT).is_file());
     }
 
+    /// 國際服整批成功：每個存在的 `.ver` 原樣寫成同目錄的 `.bck`，本批沒有 patch 的 repo 也是（舊 `.bck` 被
+    /// 取代）；沒有 `.ver` 的 repo 不寫（protocols §5.1）。
+    #[test]
+    fn global_batch_copies_each_existing_ver_to_bck() {
+        let _processes = GAME_PROCESSES.blocking_read();
+        let fx = Fixture::new();
+        fx.seed_versions();
+        let (result, _) = fx.run_in(Region::Global, &[fx.patch()], &|| false);
+        result.expect("apply");
+        assert_eq!(
+            fx.backups(),
+            [
+                (PathBuf::from(GAME_BCK), GAME_VERSION.as_bytes().to_vec()),
+                (PathBuf::from(EX1_BCK), EX1_VERSION.as_bytes().to_vec()),
+            ]
+        );
+    }
+
+    /// 本批沒有 patch 的 repo `.ver` 內容空白：同 XL `GetVer`，`.bck` 寫基礎版本，不複製空白。
+    #[test]
+    fn blank_ver_is_backed_up_as_base_version() {
+        let _processes = GAME_PROCESSES.blocking_read();
+        let fx = Fixture::new();
+        fs::write(fx.path(GAME_VER), " \r\n").expect("seed ver");
+        let (result, _) = fx.run_in(Region::Global, &[fx.patch()], &|| false);
+        result.expect("apply");
+        assert_eq!(fs::read(fx.path(GAME_BCK)).expect("bck"), crate::game::BASE_GAME_VERSION.as_bytes());
+    }
+
+    /// 國際服整批中途失敗（第二個 patch 核對不符）：第一個 patch 的 `.ver` 已推進，但不寫任何 `.bck`。
+    #[test]
+    fn failed_global_batch_writes_no_bck() {
+        let _processes = GAME_PROCESSES.blocking_read();
+        let fx = Fixture::new();
+        fx.seed_versions();
+        let mut bad = fx.patch();
+        bad.version_id = "2026.08.10.0000.0000".into();
+        bad.hashes = vec!["0".repeat(40)];
+        let (result, _) = fx.run_in(Region::Global, &[fx.patch(), bad], &|| false);
+        assert!(matches!(result, Err(ApplyFailure::BeforeWrite(_))), "{result:?}");
+        assert_eq!(fs::read_to_string(fx.path(EX1_VER)).expect("ver"), EX1_VERSION);
+        assert_eq!(fx.backups(), [(PathBuf::from(GAME_BCK), STALE_VERSION.as_bytes().to_vec())]);
+    }
+
+    /// 台服沒有查到 `.bck` 的規則：整批成功也不寫，舊 `.bck` 不動。
+    #[test]
+    fn tw_batch_writes_no_bck() {
+        let _processes = GAME_PROCESSES.blocking_read();
+        let fx = Fixture::new();
+        fx.seed_versions();
+        let (result, _) = fx.run(&[fx.patch()]);
+        result.expect("apply");
+        assert_eq!(fx.backups(), [(PathBuf::from(GAME_BCK), STALE_VERSION.as_bytes().to_vec())]);
+    }
+
+    /// 寫 `.bck` 失敗（位置被非空目錄佔住）算寫入後失敗，呼叫端保留 dirty 標記；`.ver` 已寫好。
+    #[test]
+    fn bck_write_failure_is_after_write() {
+        let _processes = GAME_PROCESSES.blocking_read();
+        let fx = Fixture::new();
+        fs::create_dir(fx.path(EX1_BCK)).expect("mkdir");
+        fs::write(fx.path(EX1_BCK).join("keep"), b"").expect("seed");
+        let (result, _) = fx.run_in(Region::Global, &[fx.patch()], &|| false);
+        assert!(matches!(result, Err(ApplyFailure::AfterWrite(_))), "{result:?}");
+        assert_eq!(fs::read_to_string(fx.path(EX1_VER)).expect("ver"), EX1_VERSION);
+    }
+
     /// 遊戲以讀取共用開著要寫的 dat：第一筆寫入前開檔即共用違規，視同遊戲執行中，遊戲目錄不變（呼叫端可清
     /// dirty 標記）。已寫入後的共用違規見 zipatch 測試 `file_opened_by_another_handle_mid_apply_is_after_write`。
     #[test]
@@ -341,6 +454,7 @@ mod tests {
         let path = fx.patch().path;
         let mut attempts = Vec::new();
         let result = apply_patches(
+            Region::Tw,
             fx.install.path(),
             &[fx.patch()],
             &mut |p| {

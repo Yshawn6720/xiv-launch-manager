@@ -27,7 +27,7 @@ use crate::patch::update::{
 use crate::region::Region;
 use crate::secrets::{self, SecretKind};
 use crate::store::{
-    self, Account, ActConfig, AfterLaunch, AppPaths, Config, DalamudChannel, GamePaths, Profile, Theme,
+    self, Account, ActConfig, AfterLaunch, AppPaths, Config, DalamudChannel, ExternalPack, GamePaths, Profile, Theme,
     UiSettings, YanmucorpVersion,
 };
 use crate::totp;
@@ -35,7 +35,7 @@ use crate::update::{self, UpdateProgress};
 
 pub struct AppState {
     pub paths: AppPaths,
-    /// 安裝衛月與啟動遊戲共用的 app-wide 鎖（主 note「程序與狀態」）。
+    /// 安裝衛月與啟動遊戲共用的 app-wide 鎖。
     pub launch_lock: Mutex<()>,
     /// 設定檔讀改寫的鎖；與 launch_lock 分開，啟動中仍可瀏覽設定。
     pub config_lock: Mutex<()>,
@@ -75,6 +75,7 @@ pub struct ConfigView {
     pub accounts_running: Vec<String>,
     pub data_dir: String,
     pub ui: UiSettings,
+    pub external_pack: ExternalPack,
 }
 
 #[tauri::command]
@@ -111,6 +112,7 @@ pub async fn get_config(state: State<'_, AppState>) -> AppResult<ConfigView> {
         accounts_running: dalamud::running_accounts(&state.paths)?,
         data_dir: state.paths.root().display().to_string(),
         ui: config.ui,
+        external_pack: config.external_pack,
     })
 }
 
@@ -163,6 +165,25 @@ pub async fn set_after_launch(state: State<'_, AppState>, after_launch: AfterLau
     update_config(&state, |c| {
         c.ui.after_launch = after_launch;
         Ok(())
+    })
+    .await
+}
+
+/// 設定 › 國際服外部包（protocols §1.6）：只在開啟時檢查資料夾（關閉時資料夾被移走也能關）；設定的檢查見
+/// `global::shadow::apply_settings`。
+#[tauri::command]
+pub async fn set_external_pack(
+    state: State<'_, AppState>,
+    dir: Option<String>,
+    enabled: bool,
+    accept_risk: bool,
+) -> AppResult<()> {
+    let dir = dir.map(|d| PathBuf::from(d.trim())).filter(|d| !d.as_os_str().is_empty());
+    update_config(&state, |c| {
+        if enabled && let Some(d) = &dir {
+            global::shadow::check_dir(d, c.games.global.as_deref())?;
+        }
+        global::shadow::apply_settings(&mut c.external_pack, dir, enabled, accept_risk)
     })
     .await
 }
@@ -263,6 +284,19 @@ pub fn open_folder(state: State<'_, AppState>, target: FolderTarget) -> AppResul
         .map_err(|e| AppError::io("開啟檔案總管", e))
 }
 
+/// 設定頁路徑輸入框旁的「選擇資料夾」：開系統的選擇資料夾對話框（主視窗為擁有者），回傳選到的路徑，取消回 `None`。
+/// 只把路徑交回前端填入輸入框，不儲存；`start` 是輸入框目前的值，存在時從那個資料夾開始。同步 command：
+/// 對話框要在主執行緒（WebView2 所在的 STA 執行緒）開，理由同 [`open_news`]。
+#[tauri::command]
+pub fn pick_folder(window: tauri::WebviewWindow, title: String, start: Option<String>) -> AppResult<Option<String>> {
+    let owner = window.hwnd().map_err(|e| AppError::Io {
+        context: "取得主視窗".into(),
+        message: e.to_string(),
+    })?;
+    let start = start.map(|s| PathBuf::from(s.trim())).filter(|p| !p.as_os_str().is_empty());
+    crate::folder_picker::pick_folder(windows::Win32::Foundation::HWND(owner.0), &title, start.as_deref())
+}
+
 /// 繁中服官網最新 5 則消息（protocols §2.7），依日期由新到舊。取不到（網路、HTTP、逾時、找不到清單區塊）時回錯誤；
 /// 沒有有效項目時回空陣列。只用於登入頁側欄顯示。
 #[tauri::command]
@@ -283,6 +317,12 @@ pub async fn get_global_news(language: crate::region::GlobalLanguage) -> AppResu
 #[tauri::command]
 pub fn open_news(region: Region, url: String) -> AppResult<()> {
     crate::news::open_news(region, &url)
+}
+
+/// 以系統預設瀏覽器開啟 `region` 的官方商城（protocols §1.4.3、§2.8）；網址由後端依區服決定。同步 command 的理由同 [`open_news`]。
+#[tauri::command]
+pub fn open_shop(region: Region) -> AppResult<()> {
+    crate::news::open_shop(region)
 }
 
 /// 不 derive `Debug`：`password`／`otp_secret` 是 secret，不得出現在任何 Debug／log 輸出。

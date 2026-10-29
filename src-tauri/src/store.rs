@@ -37,6 +37,24 @@ pub struct Config {
     /// 角色自訂名稱；舊設定檔沒有此欄位，視為都沒有名稱。
     #[serde(default)]
     pub characters: CharacterNames,
+    /// 國際服外部包（protocols §1.6）；舊設定檔沒有此欄位，視為未設定、關閉。
+    #[serde(default)]
+    pub external_pack: ExternalPack,
+}
+
+/// 國際服外部包設定（protocols §1.6）：只用於國際服，台服不套用。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalPack {
+    /// 外部包資料夾；開啟時檢查過位置與 sqpack 檔，之後檔案仍可能被移走（每次啟動再檢查一次）。
+    #[serde(default)]
+    pub dir: Option<PathBuf>,
+    /// 開啟時 `dir` 必有值且 `risk_accepted` 為真。
+    #[serde(default)]
+    pub enabled: bool,
+    /// 已確認風險說明；確認後之後的開關不再詢問。
+    #[serde(default)]
+    pub risk_accepted: bool,
 }
 
 /// 角色自訂名稱：區服 → 角色 id（16 位 hex，protocols §7.3）→ 名稱。遊戲資料夾裡沒有角色名稱，只能由使用者命名。
@@ -75,12 +93,13 @@ pub struct UiSettings {
     pub after_launch: AfterLaunch,
 }
 
-/// 介面主題：跟隨系統（預設）或強制深色、淺色。
+/// 介面主題：深色（預設）、淺色或跟隨系統。設定檔沒有這一欄（新安裝、2026-10-14 前的設定檔）時是深色；已寫入的值照用，
+/// 不改寫成深色：寫入過的 `system` 分不出是使用者選的，還是當時的預設值隨其他設定一起存下。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Theme {
-    #[default]
     System,
+    #[default]
     Dark,
     Light,
 }
@@ -274,7 +293,7 @@ pub enum YanmucorpVersion {
     Pinned { tag: String },
 }
 
-/// `%APPDATA%\xiv-launch-manager` 底下的固定配置（主 note「資料配置」）。
+/// `%APPDATA%\xiv-launch-manager` 底下的固定配置。
 #[derive(Debug, Clone)]
 pub struct AppPaths {
     root: PathBuf,
@@ -545,22 +564,25 @@ mod tests {
         let paths = AppPaths::new(dir.path().to_path_buf());
         fs::write(paths.config_file(), serde_json::json!({ "games": {} }).to_string()).expect("write");
         let config = load_config(&paths).expect("legacy config");
-        assert_eq!(config.ui.theme, Theme::System);
+        assert_eq!(config.ui.theme, Theme::Dark);
         assert_eq!(config.ui.after_launch, AfterLaunch::Keep);
 
         save_config(&paths, &config).expect("save");
         let saved: serde_json::Value =
             serde_json::from_slice(&fs::read(paths.config_file()).expect("read")).expect("json");
-        assert_eq!(saved["ui"], serde_json::json!({ "theme": "system", "afterLaunch": "keep" }));
+        assert_eq!(saved["ui"], serde_json::json!({ "theme": "dark", "afterLaunch": "keep" }));
     }
 
     #[test]
     fn ui_settings_missing_one_field_keep_the_other() {
-        let ui: UiSettings = serde_json::from_value(serde_json::json!({ "theme": "dark" })).expect("theme only");
-        assert_eq!(ui, UiSettings { theme: Theme::Dark, after_launch: AfterLaunch::Keep });
+        // 已寫入的主題照用（含跟隨系統、淺色），只有缺欄位時才是預設的深色。
+        for (stored, theme) in [("system", Theme::System), ("light", Theme::Light), ("dark", Theme::Dark)] {
+            let ui: UiSettings = serde_json::from_value(serde_json::json!({ "theme": stored })).expect("theme only");
+            assert_eq!(ui, UiSettings { theme, after_launch: AfterLaunch::Keep }, "{stored}");
+        }
         let ui: UiSettings =
             serde_json::from_value(serde_json::json!({ "afterLaunch": "tray" })).expect("after launch only");
-        assert_eq!(ui, UiSettings { theme: Theme::System, after_launch: AfterLaunch::Tray });
+        assert_eq!(ui, UiSettings { theme: Theme::Dark, after_launch: AfterLaunch::Tray });
     }
 
     #[test]

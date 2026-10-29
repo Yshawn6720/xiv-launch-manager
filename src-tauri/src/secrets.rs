@@ -1,6 +1,6 @@
 //! 密碼與 OTP 金鑰存放在 Windows Credential Manager（generic credential）。
 //!
-//! 只防設定檔外洩；同一 Windows 使用者下的程序仍可讀取（主 note「憑證與 secret」）。
+//! 只防設定檔外洩；同一 Windows 使用者下的程序仍可讀取。
 //! 錯誤訊息不帶 secret 內容。
 
 use windows::Win32::Foundation::ERROR_NOT_FOUND;

@@ -37,12 +37,15 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 /// 台服登入結果。`session_id` 會以明文進遊戲命令列（protocols §2.2），其他地方不得輸出。
 pub struct TwSession {
     pub session_id: String,
+    /// launcherLogin 回應的剩餘遊戲時間顯示文字（[`play_time_text`]）；不是 secret。
+    pub play_time: String,
 }
 
 impl fmt::Debug for TwSession {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TwSession")
             .field("session_id", &"<redacted>")
+            .field("play_time", &self.play_time)
             .finish()
     }
 }
@@ -50,6 +53,20 @@ impl fmt::Debug for TwSession {
 /// 字串的 UTF-8 bytes 轉小寫 hex（launcherLogin 的 email／password 格式）。
 pub fn hex_encode(s: &str) -> String {
     hex::encode(s.as_bytes())
+}
+
+/// launcherLogin 回應 `remain`（剩餘遊戲時間，秒）的顯示文字（protocols §2.1「剩餘遊戲時間」）：不是正整數就是
+/// 「無法取得」，不讓登入失敗。分段同 Unnbird/FF14_TC_Launcher：未滿 86399 秒以小時、未滿 863999999 秒以天
+/// （都無條件進位），其餘是無限制。
+fn play_time_text(remain: Option<&serde_json::Value>) -> String {
+    const HOUR: u64 = 3_600;
+    const DAY: u64 = 86_400;
+    match remain.and_then(serde_json::Value::as_u64) {
+        Some(secs @ 1..86_399) => format!("剩餘約 {} 小時", secs.div_ceil(HOUR)),
+        Some(secs @ 86_399..863_999_999) => format!("剩餘約 {} 天", secs.div_ceil(DAY)),
+        Some(863_999_999..) => "無限制".into(),
+        Some(0) | None => "無法取得".into(),
+    }
 }
 
 /// 遊戲明文參數（protocols §2.2）。`login` 保證 session_id 不含空白，參數不會被切開。
@@ -89,6 +106,7 @@ pub async fn login(
     };
     let (status, response) =
         post_api::<LoginResponse>(&client, LOGIN_URL, &request, "繁中服 launcherLogin").await?;
+    let play_time = play_time_text(response.remain.as_ref());
     let login_token = accepted_value(status, response.error, response.token, "繁中服 launcherLogin")?;
 
     // 伺服器要求取 session 前先送版本檢查；需更新時不取 session。
@@ -112,7 +130,7 @@ pub async fn login(
     if !session_id.bytes().all(|b| b.is_ascii_graphic()) {
         return Err(AppError::protocol("繁中服 launcherSession（sessionId 格式）"));
     }
-    Ok(VersionCheck::UpToDate(TwSession { session_id }))
+    Ok(VersionCheck::UpToDate(TwSession { session_id, play_time }))
 }
 
 #[derive(Serialize)]
@@ -127,6 +145,8 @@ struct LoginRequest<'a> {
 struct LoginResponse {
     token: Option<String>,
     error: Option<String>,
+    /// 剩餘遊戲時間（秒）；任何型別都接，交給 [`play_time_text`] 判斷，不讓解析失敗擋住登入。
+    remain: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -255,7 +275,7 @@ async fn check_version_with(
 }
 
 /// 版本檢查的 URL 版本與 body。`ffxivgame.ver` 缺失即 [`AppError::VersionFileMissing`]（不以基礎版本兜底
-/// 要清單，主 note「版本來源」）；body 開頭的 `\n` 代表不送 boot 版本，之後只列存在的資料片（§2.3）。
+/// 要清單）；body 開頭的 `\n` 代表不送 boot 版本，之後只列存在的資料片（§2.3）。
 fn version_check_inputs(install: &Path) -> AppResult<(String, String)> {
     let game_ver = update::required_game_version(Region::Tw, install)?;
     let mut body = String::from("\n");
@@ -410,12 +430,41 @@ mod tests {
     fn launch_args_match_protocol() {
         let session = TwSession {
             session_id: "abc123".to_string(),
+            play_time: "無法取得".to_string(),
         };
         // 逐字取自 protocols §2.2，不用續行字串，避免與實作犯同一個錯。
         let expected = "DEV.LobbyHost01=neolobby01.ffxiv.com.tw DEV.LobbyPort01=54994 DEV.GMServerHost=frontier.ffxiv.com.tw DEV.TestSID=abc123 SYS.resetConfig=0 DEV.SaveDataBankHost=config-dl.ffxiv.com.tw";
         assert_eq!(launch_args(&session, &[]), expected);
         let extra = [("SYS.ScreenMode".to_string(), "2".to_string())];
         assert_eq!(launch_args(&session, &extra), format!("{expected} SYS.ScreenMode=2"));
+    }
+
+    /// `remain` 任何形狀都不讓 launcherLogin 回應解析失敗（登入照常），顯示文字照 protocols §2.1「剩餘遊戲時間」。
+    #[test]
+    fn login_response_remain_never_blocks_login_and_maps_to_play_time() {
+        let cases: [(&str, &str); 16] = [
+            (r#"{"token":"t"}"#, "無法取得"),
+            (r#"{"token":"t","remain":null}"#, "無法取得"),
+            (r#"{"token":"t","remain":0}"#, "無法取得"),
+            (r#"{"token":"t","remain":-5}"#, "無法取得"),
+            (r#"{"token":"t","remain":3600.5}"#, "無法取得"),
+            (r#"{"token":"t","remain":"2592000"}"#, "無法取得"),
+            (r#"{"token":"t","remain":{"days":30}}"#, "無法取得"),
+            (r#"{"token":"t","remain":1}"#, "剩餘約 1 小時"),
+            (r#"{"token":"t","remain":3600}"#, "剩餘約 1 小時"),
+            (r#"{"token":"t","remain":3601}"#, "剩餘約 2 小時"),
+            (r#"{"token":"t","remain":86398}"#, "剩餘約 24 小時"),
+            (r#"{"token":"t","remain":86399}"#, "剩餘約 1 天"),
+            (r#"{"token":"t","remain":2592000}"#, "剩餘約 30 天"),
+            (r#"{"token":"t","remain":2592001}"#, "剩餘約 31 天"),
+            (r#"{"token":"t","remain":863999998}"#, "剩餘約 10000 天"),
+            (r#"{"token":"t","remain":863999999}"#, "無限制"),
+        ];
+        for (body, expected) in cases {
+            let response: LoginResponse = serde_json::from_str(body).expect(body);
+            assert_eq!(response.token.as_deref(), Some("t"), "{body}");
+            assert_eq!(play_time_text(response.remain.as_ref()), expected, "{body}");
+        }
     }
 
     type RequestHead = (String, Vec<(String, String)>);

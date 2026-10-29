@@ -1,4 +1,4 @@
-//! 提權 helper 入口（主 note「信任邊界（方案 1）」）：實際的 exe 帶 `--apply-patches` 時，在 `run()` 與
+//! 提權 helper 入口：實際的 exe 帶 `--apply-patches` 時，在 `run()` 與
 //! single-instance plugin 之前分派成 helper，以 helper 的 exit code 結束，不建 Tauri 視窗。
 //! 分派若壞掉，exe 會長成 GUI（逾時），或在主程式存活時把命令列交給第一實例後 exit 0，都不會是 2 或 10。
 //! 一般權限、不經 UAC：參數不符或 job 讀不到，走不到 HKLM 解析與寫入。

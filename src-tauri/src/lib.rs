@@ -5,6 +5,7 @@ mod characters;
 mod commands;
 mod dalamud;
 mod error;
+mod folder_picker;
 mod game;
 mod global;
 mod launch;
@@ -21,7 +22,7 @@ mod update;
 use tauri::Manager;
 use tokio::sync::Mutex;
 
-/// 提權 helper 入口（主 note「信任邊界」）：命令列是 `--apply-patches` 時執行 helper 並回傳 exit code，否則 None。
+/// 提權 helper 入口：命令列是 `--apply-patches` 時執行 helper 並回傳 exit code，否則 None。
 /// main.rs 在 [`run`]（與 single-instance plugin）之前呼叫，helper 不建 Tauri。
 pub fn helper_dispatch() -> Option<i32> {
     patch::helper::dispatch_from_args()
@@ -36,7 +37,7 @@ pub fn finish_update_handoff() {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        // 單一實例：所有安裝與啟動共用同一把 app-wide mutex（主 note「程序與狀態」）。
+        // 單一實例：所有安裝與啟動共用同一把 app-wide mutex。
         // 縮到系統匣時主視窗是隱藏的：再次開啟本程式時叫回視窗並拿掉系統匣圖示。
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(main_window) = app.try_state::<main_window::MainWindow>() {
@@ -83,13 +84,16 @@ pub fn run() {
             commands::set_game_path,
             commands::set_theme,
             commands::set_after_launch,
+            commands::set_external_pack,
             commands::detect_game_path,
             commands::detect_dalamud_data,
             commands::get_server_status,
             commands::open_folder,
+            commands::pick_folder,
             commands::get_tw_news,
             commands::get_global_news,
             commands::open_news,
+            commands::open_shop,
             commands::save_account,
             commands::set_account_profile,
             commands::import_detected_profile,

@@ -1,4 +1,4 @@
-//! ZiPatch 解析與套用（protocols §5.4），以及套用成功後寫 `.ver`（§5.1）。
+//! ZiPatch 解析與套用（protocols §5.4），以及套用成功後寫 `.ver`、整批成功後把 `.ver` 寫成 `.bck`（§5.1）。
 //!
 //! 兩階段，呼叫端全程用同一個已開啟的 handle（以拒絕共用寫入開啟、已用
 //! `patch::list::verify_blocks` 核對；兩個階段都會自行 seek 回檔頭）：
@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use windows::Win32::Foundation::ERROR_SHARING_VIOLATION;
 
 use crate::error::{AppError, AppResult};
-use crate::game::MAX_EXPANSION;
+use crate::game::{BASE_GAME_VERSION, MAX_EXPANSION};
 use crate::patch::apply::ApplyFailure;
 use crate::patch::list::Repo;
 use crate::store::replace_write_through;
@@ -81,8 +81,8 @@ impl<R: Read + Seek> ScannedPatch<'_, R> {
     /// 所以成功回傳時資料已落盤，呼叫端接著寫 `.ver` 不會比資料先落盤。
     ///
     /// 遊戲檔以不共用（share mode 0）開啟，寫入與 `sync_all` 用同一個 handle，持有到落盤完成：套用期間
-    /// 其他程序（含遊戲）開不了、刪不掉、改不了名已寫過的檔。失敗分類（protocols §5.4.1、主 note
-    /// 「遊戲執行判定」）：本 patch 尚未改動遊戲目錄時遇共用違規＝[`ApplyFailure::BeforeWrite`]
+    /// 其他程序（含遊戲）開不了、刪不掉、改不了名已寫過的檔。失敗分類（protocols §5.4.1）：
+    /// 本 patch 尚未改動遊戲目錄時遇共用違規＝[`ApplyFailure::BeforeWrite`]
     /// （[`AppError::GameRunning`]）；其他失敗一律 [`ApplyFailure::AfterWrite`]——遊戲目錄可能已被寫入，
     /// 呼叫端停止、不寫該 patch 的 `.ver`、保留 dirty 標記。
     pub fn apply(self, progress: &mut dyn FnMut(u64)) -> Result<(), ApplyFailure> {
@@ -108,16 +108,45 @@ impl<R: Read + Seek> ScannedPatch<'_, R> {
 /// `sync_all`，parent 在它成功之後才清 dirty 標記。新建的遊戲檔不另 flush 所在目錄：NTFS 的 metadata
 /// 變更依序寫進同一份日誌，寫穿改名落盤時，排在它之前的建檔紀錄也已落盤。
 pub fn write_version(game_root: &Path, repo: Repo, version_id: &str) -> AppResult<()> {
-    let rel = version_file(repo)?;
-    target::ensure_no_link(game_root, &rel)?;
-    let file = game_root.join(&rel);
-    let tmp = file.with_file_name(format!("xlm-{}.ver.tmp", uuid::Uuid::new_v4().simple()));
+    replace_version_file(game_root, &version_file(repo)?, version_id.as_bytes())
+}
+
+/// 把 `repo` 的 `.ver` 寫成同目錄同名的 `.bck`（protocols §5.1；XL `VerToBck`）：`.ver` 不存在就不寫；內容
+/// 空白時同 XL 寫 [`BASE_GAME_VERSION`]，其餘原樣。寫法同 [`write_version`]。只能在整批 patch 都套用並寫好
+/// `.ver` 之後呼叫。
+pub fn copy_version_to_backup(game_root: &Path, repo: Repo) -> AppResult<()> {
+    let ver = version_file(repo)?;
+    target::ensure_no_link(game_root, &ver)?;
+    let bytes = match fs::read(game_root.join(&ver)) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(AppError::io("讀取 .ver", e)),
+    };
+    let content = if bytes.iter().all(u8::is_ascii_whitespace) {
+        BASE_GAME_VERSION.as_bytes()
+    } else {
+        &bytes
+    };
+    replace_version_file(game_root, &ver.with_extension("bck"), content)
+}
+
+/// 以 `bytes` 取代 `{game_root}\{rel}`：先寫同目錄暫存檔並 `sync_all`，再以 [`replace_write_through`] 取代
+/// （改名寫入磁碟後才返回）；不建立目錄，路徑經過連結就拒絕。
+fn replace_version_file(game_root: &Path, rel: &Path, bytes: &[u8]) -> AppResult<()> {
+    target::ensure_no_link(game_root, rel)?;
+    let file = game_root.join(rel);
+    let kind = rel.extension().unwrap_or_default().to_string_lossy();
+    let tmp = file.with_file_name(format!("xlm-{}.{kind}.tmp", uuid::Uuid::new_v4().simple()));
     let created = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&tmp)
-        .map_err(|e| AppError::io("建立 .ver 暫存檔", e))?;
-    commit_version(created, &tmp, &file, version_id.as_bytes()).map_err(|(context, err)| {
+        .map_err(|e| AppError::io(format!("建立 .{kind} 暫存檔"), e))?;
+    commit_version(created, &tmp, &file, bytes).map_err(|(step, err)| {
+        let context = match step {
+            CommitStep::Write => format!("寫入 .{kind} 暫存檔"),
+            CommitStep::Replace => format!("取代 .{kind}"),
+        };
         match fs::remove_file(&tmp) {
             Ok(()) => AppError::io(context, err),
             Err(cleanup) => AppError::Io {
@@ -532,20 +561,24 @@ fn version_file(repo: Repo) -> Result<PathBuf, Fail> {
     }
 }
 
-/// 寫暫存檔、`sync_all`，再以 [`replace_write_through`] 取代 `.ver`；失敗時回傳步驟名與錯誤，由呼叫端
+/// [`commit_version`] 失敗的步驟。
+enum CommitStep {
+    Write,
+    Replace,
+}
+
+/// 寫暫存檔、`sync_all`，再以 [`replace_write_through`] 取代版本檔；失敗時回傳步驟與錯誤，由呼叫端
 /// 清掉暫存檔。
 fn commit_version(
     mut created: File,
     tmp: &Path,
     file: &Path,
     bytes: &[u8],
-) -> Result<(), (&'static str, io::Error)> {
-    created
-        .write_all(bytes)
-        .map_err(|e| ("寫入 .ver 暫存檔", e))?;
-    created.sync_all().map_err(|e| ("寫入 .ver 暫存檔", e))?;
+) -> Result<(), (CommitStep, io::Error)> {
+    created.write_all(bytes).map_err(|e| (CommitStep::Write, e))?;
+    created.sync_all().map_err(|e| (CommitStep::Write, e))?;
     drop(created);
-    replace_write_through(tmp, file).map_err(|e| ("取代 .ver", e))
+    replace_write_through(tmp, file).map_err(|e| (CommitStep::Replace, e))
 }
 
 #[cfg(test)]

@@ -52,12 +52,29 @@ fn allowed_url(region: Region, raw: &str) -> Option<Url> {
 }
 
 /// 以系統預設瀏覽器開啟 `region` 的消息（`open_news` command）。不信任前端傳來的值：先以 [`allowed_url`] 再檢查
-/// 一次該服白名單，不符回 [`AppError::NewsLinkRejected`]、不開啟。以 `ShellExecuteExW`（verb `open`，與 ACT 相同）
-/// 交給 https 的預設處理程式，不經 shell。不用開資料夾的 `explorer.exe <URL>`：2026-10-14 本機（Windows 11
-/// build 26300）實測它會開出「文件」資料夾，不會開瀏覽器。
+/// 一次該服白名單，不符回 [`AppError::NewsLinkRejected`]、不開啟。
 pub fn open_news(region: Region, raw: &str) -> AppResult<()> {
     let url = allowed_url(region, raw).ok_or(AppError::NewsLinkRejected { region })?;
-    let file = HSTRING::from(url.as_str());
+    open_in_browser(url.as_str())
+}
+
+/// 各服官方商城（protocols §1.4.3、§2.8）：國際服 Mog Station、繁中服水晶商城。
+fn shop_url(region: Region) -> &'static str {
+    match region {
+        Region::Global => "https://secure.square-enix.com/account/app/svc/mogstation/",
+        Region::Tw => "https://www.ffxiv.com.tw/web/store/index.aspx",
+    }
+}
+
+/// 以系統預設瀏覽器開啟 `region` 的官方商城（`open_shop` command）；網址是 [`shop_url`] 的常數，不收前端傳來的網址。
+pub fn open_shop(region: Region) -> AppResult<()> {
+    open_in_browser(shop_url(region))
+}
+
+/// 以 `ShellExecuteExW`（verb `open`，與 ACT 相同）把 `url` 交給 https 的預設處理程式，不經 shell。不用開資料夾的
+/// `explorer.exe <URL>`：2026-10-14 本機（Windows 11 build 26300）實測它會開出「文件」資料夾，不會開瀏覽器。
+fn open_in_browser(url: &str) -> AppResult<()> {
+    let file = HSTRING::from(url);
     let mut info = SHELLEXECUTEINFOW {
         cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
         // NOASYNC：要求呼叫返回前完成啟動（呼叫端不保證有訊息迴圈）。
@@ -115,6 +132,17 @@ mod tests {
         ];
         for (region, raw, expected) in cases {
             assert_eq!(allowed_url(region, raw).map(String::from).as_deref(), expected, "{region} {raw}");
+        }
+    }
+
+    #[test]
+    fn shop_opens_each_regions_official_store_over_https() {
+        let cases = [
+            (Region::Global, "https://secure.square-enix.com/account/app/svc/mogstation/"),
+            (Region::Tw, "https://www.ffxiv.com.tw/web/store/index.aspx"),
+        ];
+        for (region, expected) in cases {
+            assert_eq!(shop_url(region), expected, "{region}");
         }
     }
 }

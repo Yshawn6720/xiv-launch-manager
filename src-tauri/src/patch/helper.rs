@@ -1,13 +1,15 @@
-//! 國際服提權 helper（主 note「國際服寫入權限」「信任邊界（方案 1）」）。
+//! 國際服提權 helper（protocols §1.6「重建 helper」）。
 //!
-//! 同一個 exe 以 `--apply-patches <job 絕對路徑> <job SHA-256>` 經 UAC 啟動。`main` 第一件事就呼叫
+//! 同一個 exe 以 `--apply-patches <job 絕對路徑> <job SHA-256>`（套用 patch）或
+//! `--build-shadow <安裝根目錄> <外部包資料夾>`（重建影子資料夾）經 UAC 啟動。`main` 第一件事就呼叫
 //! [`dispatch_from_args`]，在 `run()` 與 single-instance plugin 之前分派：helper 不建 Tauri、
-//! WebView、updater，只做「核對＋套用＋寫 `.ver`」，以 exit code 結束，不輸出任何內容。
+//! WebView、updater，只做「核對＋套用＋寫 `.ver`、`.bck`」或「核對＋重建影子」，以 exit code 結束，不輸出任何內容。
 //! parent 只以 exit code 判定成敗；進度檔僅供顯示。
 //!
 //! exit code：0＝成功、10＝寫入前中止（job 或進度檔無效、安裝路徑不符、遊戲執行中、無法判定安裝資料夾的
-//! 權限、核對或掃描失敗、之前的 patch 已完整套用而下一個在寫入前失敗）、11＝另一個套用佔著同一安裝的 named
-//! mutex、12＝安裝資料夾一般權限就能修改（拒絕以系統管理員權限寫入）、20＝已寫入後失敗、2＝參數不符。
+//! 權限、核對或掃描失敗、之前的 patch 已完整套用而下一個在寫入前失敗；影子：動到影子之前中止）、11＝另一個
+//! 套用佔著同一安裝的 named mutex、12＝安裝資料夾（影子：影子上層資料夾）一般權限就能修改（拒絕以系統管理員
+//! 權限寫入）、20＝已寫入後失敗、2＝參數不符。
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, OpenOptions};
@@ -21,9 +23,9 @@ use std::path::{Path, PathBuf};
 use windows::Win32::Foundation::{ERROR_CANCELLED, HANDLE, WAIT_ABANDONED, WAIT_OBJECT_0};
 use windows::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_NAME_NORMALIZED,
-    FILE_READ_ATTRIBUTES, FILE_SHARE_READ, GETFINALPATHNAMEBYHANDLE_FLAGS,
-    GetFileInformationByHandle, GetFinalPathNameByHandleW, VOLUME_NAME_NT,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, GETFINALPATHNAMEBYHANDLE_FLAGS,
+    GetFileInformationByHandle, GetFinalPathNameByHandleW, VOLUME_NAME_DOS, VOLUME_NAME_NT,
 };
 use windows::Win32::System::Threading::{
     CreateMutexW, GetExitCodeProcess, INFINITE, ReleaseMutex, WaitForSingleObject,
@@ -36,13 +38,15 @@ use windows::core::{HRESULT, PCWSTR, w};
 
 use crate::error::{AppError, AppResult};
 use crate::game;
+use crate::global::shadow;
 use crate::patch::access::{self, AccessToken};
 use crate::patch::apply::{ApplyFailure, ApplyProgress, apply_patches};
 use crate::patch::job::{self, Job, is_plain_absolute, is_sha256_hex, read_job, sha256_hex};
-use crate::patch::running::{Win32Handle, install_in_use, normalize_path, win_error};
+use crate::patch::running::{Win32Handle, comparable, exe_running, install_in_use, normalize_path, win_error};
 use crate::region::Region;
 
 const FLAG: &str = "--apply-patches";
+const SHADOW_FLAG: &str = "--build-shadow";
 const EXIT_SUCCESS: i32 = 0;
 const EXIT_BAD_ARGS: i32 = 2;
 const EXIT_ABORTED_BEFORE_WRITE: i32 = 10;
@@ -88,15 +92,16 @@ impl HelperExit {
     }
 }
 
-/// `main` 第一行呼叫：命令列不含 `--apply-patches` 回 `None`（照常 `run()`）；含時執行 helper 並回傳
-/// exit code（`main` 以 `std::process::exit` 結束），不建 Tauri。旗標出現但形式不符一律回 2，不會
-/// 退回啟動 GUI（避免提權程序長成完整介面）。
+/// `main` 第一行呼叫：命令列不含 `--apply-patches`、`--build-shadow` 回 `None`（照常 `run()`）；含時執行
+/// helper 並回傳 exit code（`main` 以 `std::process::exit` 結束），不建 Tauri。旗標出現但形式不符一律回 2，
+/// 不會退回啟動 GUI（避免提權程序長成完整介面）。
 pub fn dispatch_from_args() -> Option<i32> {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     match parse_args(&args) {
         Invocation::Normal => None,
         Invocation::Invalid => Some(EXIT_BAD_ARGS),
         Invocation::Apply { job, sha256 } => Some(run_helper(&job, &sha256)),
+        Invocation::Shadow { install, pack } => Some(run_shadow_helper(&install, &pack)),
     }
 }
 
@@ -109,11 +114,25 @@ pub fn run_elevated(job_path: &Path, job_sha256: &str) -> AppResult<HelperExit> 
     if !job_path.is_absolute() || !is_sha256_hex(job_sha256) {
         return Ok(HelperExit::NotStarted);
     }
+    shell_execute_elevated(&helper_parameters(job_path, job_sha256), "更新程式")
+}
+
+/// [`run_elevated`] 的影子版：啟動 `--build-shadow <install> <pack>`（protocols §1.6「重建 helper」）。
+/// 兩個路徑都必須是一般的絕對路徑，否則不啟動。
+pub fn run_shadow_elevated(install: &Path, pack: &Path) -> AppResult<HelperExit> {
+    if !is_plain_absolute(install) || !is_plain_absolute(pack) {
+        return Ok(HelperExit::NotStarted);
+    }
+    shell_execute_elevated(&shadow_parameters(install, pack), "影子建立程式")
+}
+
+/// 以 verb `runas` 啟動同一 exe、帶 `parameters`（以 0 結尾的 UTF-16），等它結束並轉換 exit code；`name`
+/// 只用於錯誤訊息。結果的意義見 [`run_elevated`]。
+fn shell_execute_elevated(parameters: &[u16], name: &str) -> AppResult<HelperExit> {
     let Ok(exe) = std::env::current_exe() else {
         return Ok(HelperExit::NotStarted);
     };
     let file = wide_nul(exe.as_os_str());
-    let parameters = helper_parameters(job_path, job_sha256);
     let mut info = SHELLEXECUTEINFOW {
         cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
         // NOASYNC：呼叫端是沒有訊息迴圈的背景執行緒，要求呼叫返回前完成啟動。
@@ -124,8 +143,9 @@ pub fn run_elevated(job_path: &Path, job_sha256: &str) -> AppResult<HelperExit> 
         nShow: SW_HIDE.0,
         ..Default::default()
     };
-    // SAFETY: info 的字串指標指向本函式持有、以 0 結尾且呼叫期間存活的緩衝區；cbSize 已設定。
-    // 成功時 hProcess 交給 Win32Handle 獨占。quality-allow: Win32 FFI，ShellExecuteExW 沒有安全包裝
+    // SAFETY: info 的字串指標指向以 0 結尾且呼叫期間存活的緩衝區（file 由本函式持有，parameters 由呼叫端
+    // 借出）；cbSize 已設定。成功時 hProcess 交給 Win32Handle 獨占。
+    // quality-allow: Win32 FFI，ShellExecuteExW 沒有安全包裝
     match unsafe { ShellExecuteExW(&mut info) } {
         Ok(()) => {}
         Err(e) if e.code() == HRESULT::from_win32(ERROR_CANCELLED.0) => {
@@ -141,14 +161,14 @@ pub fn run_elevated(job_path: &Path, job_sha256: &str) -> AppResult<HelperExit> 
     // quality-allow: Win32 FFI，WaitForSingleObject 沒有安全包裝
     if unsafe { WaitForSingleObject(process.get(), INFINITE) } != WAIT_OBJECT_0 {
         return Err(AppError::Install {
-            context: "等待更新程式結束失敗".into(),
+            context: format!("等待{name}結束失敗"),
         });
     }
     let mut code = 0u32;
     // SAFETY: process 是有效的程序 handle；code 是本函式存活中的區域變數。
     // quality-allow: Win32 FFI，GetExitCodeProcess 沒有安全包裝
     unsafe { GetExitCodeProcess(process.get(), &mut code) }
-        .map_err(|e| win_error("讀取更新程式結果", e))?;
+        .map_err(|e| win_error(&format!("讀取{name}結果"), e))?;
     // exit code 是 32 位元值；崩潰的 NTSTATUS（0xC…）轉成負數，落在 Other。
     Ok(HelperExit::from_exit_code(code as i32))
 }
@@ -158,25 +178,33 @@ enum Invocation {
     Normal,
     Invalid,
     Apply { job: PathBuf, sha256: String },
+    Shadow { install: PathBuf, pack: PathBuf },
 }
 
-/// `args` 不含程式名稱。只認恰好 `--apply-patches <job 絕對路徑> <64 位小寫 hex>`。
+/// `args` 不含程式名稱。只認恰好 `--apply-patches <job 絕對路徑> <64 位小寫 hex>`，或
+/// `--build-shadow <安裝根目錄> <外部包資料夾>`（兩者都是一般的絕對路徑）；兩個旗標都沒出現才是一般啟動。
 fn parse_args(args: &[OsString]) -> Invocation {
-    if !args.iter().any(|arg| arg == FLAG) {
+    if !args.iter().any(|arg| arg == FLAG || arg == SHADOW_FLAG) {
         return Invocation::Normal;
     }
-    let [flag, job, sha256] = args else {
+    let [flag, first, second] = args else {
         return Invocation::Invalid;
     };
-    let job = PathBuf::from(job);
-    match sha256.to_str() {
-        Some(sha256) if flag == FLAG && job.is_absolute() && is_sha256_hex(sha256) => {
-            Invocation::Apply {
+    if flag == FLAG {
+        let job = PathBuf::from(first);
+        return match second.to_str() {
+            Some(sha256) if job.is_absolute() && is_sha256_hex(sha256) => Invocation::Apply {
                 job,
                 sha256: sha256.to_string(),
-            }
-        }
-        _ => Invocation::Invalid,
+            },
+            _ => Invocation::Invalid,
+        };
+    }
+    let (install, pack) = (PathBuf::from(first), PathBuf::from(second));
+    if flag == SHADOW_FLAG && is_plain_absolute(&install) && is_plain_absolute(&pack) {
+        Invocation::Shadow { install, pack }
+    } else {
+        Invocation::Invalid
     }
 }
 
@@ -187,6 +215,17 @@ fn helper_parameters(job_path: &Path, sha256: &str) -> Vec<u16> {
     quote_arg(job_path.as_os_str(), &mut out);
     out.push(u16::from(b' '));
     out.extend(sha256.encode_utf16());
+    out.push(0);
+    out
+}
+
+/// `--build-shadow "<install>" "<pack>"`（以 0 結尾的 UTF-16）。
+fn shadow_parameters(install: &Path, pack: &Path) -> Vec<u16> {
+    let mut out: Vec<u16> = SHADOW_FLAG.encode_utf16().collect();
+    for path in [install, pack] {
+        out.push(u16::from(b' '));
+        quote_arg(path.as_os_str(), &mut out);
+    }
     out.push(0);
     out
 }
@@ -219,8 +258,8 @@ fn wide_nul(s: &OsStr) -> Vec<u16> {
 
 /// helper 本體。任何錯誤都只轉成 exit code，不輸出內容。寫入目標一律用 HKLM 解析出的安裝根目錄，
 /// job 的 `expected_install` 只用來交叉核對。安裝資料夾一般權限就能修改時拒絕寫入：那種安裝裡一般權限程序
-/// 可以在 junction 檢查與實際寫入之間換掉子目錄，把系統管理員權限的寫入導到別處（parent 遇到可修改的安裝
-/// 本來就在程序內套用，不會啟動 helper）。
+/// 可以在 junction 檢查與實際寫入之間換掉子目錄，把系統管理員權限的寫入導到別處（parent 以一般身分執行時遇到
+/// 可修改的安裝本來就在程序內套用；以系統管理員身分執行時一律啟動 helper，由這裡判定）。
 fn run_helper(job_path: &Path, sha256: &str) -> i32 {
     let Ok((job, mut progress)) = open_job(job_path, sha256) else {
         return EXIT_ABORTED_BEFORE_WRITE;
@@ -245,14 +284,67 @@ fn run_helper(job_path: &Path, sha256: &str) -> i32 {
     if !matches!(install_in_use(&install), Ok(false)) {
         return EXIT_ABORTED_BEFORE_WRITE;
     }
-    match apply_patches(&install, &job.patches, &mut |p| progress.write(p), &|| false) {
+    match apply_patches(Region::Global, &install, &job.patches, &mut |p| progress.write(p), &|| false) {
         Ok(()) => EXIT_SUCCESS,
         Err(ApplyFailure::BeforeWrite(_)) => EXIT_ABORTED_BEFORE_WRITE,
         Err(ApplyFailure::AfterWrite(_)) => EXIT_FAILED_AFTER_WRITE,
     }
 }
 
-/// 讀命令列的 job 並開啟它的進度檔（主 note「信任邊界」成敗與進度）。進度檔不由 job 指定，固定是
+/// 影子 helper 本體（protocols §1.6「重建 helper」）。任何錯誤都只轉成 exit code。安裝路徑以 HKLM 為準，命令列的
+/// 只用來核對；外部包在這裡重新檢查位置與檔名。影子上層資料夾一般權限就能修改時拒絕：那種位置的一般程序
+/// 可以在建立途中把影子裡的資料夾換成連結，把系統管理員權限的建立導到別處（parent 遇到這種位置本來就在
+/// 程序內重建，不會啟動 helper）。影子根目錄以受保護的 DACL 建立，裡面的資料夾不受上層權限影響。
+fn run_shadow_helper(install_arg: &Path, pack_dir: &Path) -> i32 {
+    let Ok(expected) = normalize_path(install_arg) else {
+        return EXIT_ABORTED_BEFORE_WRITE;
+    };
+    let Some(_lock) = InstallLock::acquire(&expected) else {
+        return EXIT_BUSY;
+    };
+    let Some(install) = game::detect_install(Region::Global) else {
+        return EXIT_ABORTED_BEFORE_WRITE;
+    };
+    if !matches!(normalize_path(&install), Ok(actual) if actual == expected) {
+        return EXIT_ABORTED_BEFORE_WRITE;
+    }
+    let Some(root) = shadow::root_for(&install) else {
+        return EXIT_ABORTED_BEFORE_WRITE;
+    };
+    let Some(parent) = root.parent() else {
+        return EXIT_ABORTED_BEFORE_WRITE;
+    };
+    // 持有到 build 結束：這段期間上層與它的每一層上層都不能被改名或換成連結。
+    let Ok(_parent_dir) = hold_shadow_parent(parent) else {
+        return EXIT_ABORTED_BEFORE_WRITE;
+    };
+    let Ok(token) = AccessToken::unelevated() else {
+        return EXIT_ABORTED_BEFORE_WRITE;
+    };
+    match access::may_modify_dir(&token, parent) {
+        Ok(false) => {}
+        Ok(true) => return EXIT_INSTALL_MODIFIABLE,
+        Err(_) => return EXIT_ABORTED_BEFORE_WRITE,
+    }
+    // 影子的遊戲不論屬於哪個安裝，在執行就不重建（重建會刪掉它正在用的檔案）。
+    let shadow_exe = shadow::game_exe(&root);
+    let shadow_running = shadow_exe.is_file() && !matches!(exe_running(&shadow_exe), Ok(false));
+    if shadow_running || !matches!(install_in_use(&install), Ok(false)) {
+        return EXIT_ABORTED_BEFORE_WRITE;
+    }
+    let Ok(pack) = shadow::check_dir(pack_dir, Some(&install)) else {
+        return EXIT_ABORTED_BEFORE_WRITE;
+    };
+    let Ok(plan) = shadow::plan(&install, &pack) else {
+        return EXIT_ABORTED_BEFORE_WRITE;
+    };
+    match shadow::build(&root, &install, &plan, shadow::create_protected_dir) {
+        Ok(()) => EXIT_SUCCESS,
+        Err(_) => EXIT_FAILED_AFTER_WRITE,
+    }
+}
+
+/// 讀命令列的 job 並開啟它的進度檔。進度檔不由 job 指定，固定是
 /// [`job::progress_path`]（job 所在目錄下）。三個 handle 都開著時以 `GetFinalPathNameByHandleW` 取最終
 /// 路徑核對：job 目錄以不跟隨最後一層 reparse point 開啟，`job.json` 與進度檔的父目錄都必須等於它。
 /// job 目錄本身是 junction／symlink（例如在 UAC 對話框期間被換掉）、`job.json` 或進度檔經連結落在
@@ -265,9 +357,9 @@ fn open_job(job_path: &Path, sha256: &str) -> AppResult<(Job, ProgressFile)> {
     let dir = open_job_dir(job_dir)?;
     let (job, job_file) = read_job(job_path, sha256)?;
     let progress = ProgressFile::open(&job::progress_path(job_dir))?;
-    let dir_final = final_path(&dir)?;
+    let dir_final = final_path(&dir, VOLUME_NAME_NT)?;
     for file in [&job_file, &progress.0] {
-        if final_path(file)?.parent() != Some(dir_final.as_path()) {
+        if final_path(file, VOLUME_NAME_NT)?.parent() != Some(dir_final.as_path()) {
             return Err(untrusted("job 或進度檔不在命令列的 job 目錄內"));
         }
     }
@@ -293,11 +385,35 @@ fn open_job_dir(dir: &Path) -> AppResult<File> {
     Ok(file)
 }
 
-/// handle 的最終路徑（`GetFinalPathNameByHandleW`：展開 junction／symlink、長檔名與實際大小寫，
-/// NT 裝置路徑形式，不受磁碟代號對應影響）。
-fn final_path(file: &File) -> AppResult<PathBuf> {
+/// 開啟影子上層資料夾，共用模式不含刪除：持有期間它與它的每一層上層都不能被改名或刪除（NTFS 拒絕改名
+/// 底下有開啟中項目的資料夾），之後以字面路徑做的檢查與建立都落在這個資料夾。要求列出內容的權限：只要求
+/// 讀屬性的 handle 不參與共用模式檢查，擋不住改名。它本身是連結、不是目錄，或最終路徑和字面路徑不同
+/// （某一層上層是 junction／symlink，連結的目標可以被改掉）都回錯。
+fn hold_shadow_parent(parent: &Path) -> AppResult<File> {
+    let file = OpenOptions::new()
+        .access_mode(FILE_LIST_DIRECTORY.0 | FILE_READ_ATTRIBUTES.0)
+        .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0 | FILE_FLAG_OPEN_REPARSE_POINT.0)
+        .open(parent)
+        .map_err(|e| AppError::io("開啟影子資料夾的上層", e))?;
+    let attributes = file
+        .metadata()
+        .map_err(|e| AppError::io("讀取影子資料夾的上層", e))?
+        .file_attributes();
+    if attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 || attributes & FILE_ATTRIBUTE_DIRECTORY.0 == 0 {
+        return Err(untrusted("影子資料夾的上層是連結或不是目錄"));
+    }
+    if comparable(&final_path(&file, VOLUME_NAME_DOS)?) != comparable(parent) {
+        return Err(untrusted("影子資料夾的上層路徑經過連結"));
+    }
+    Ok(file)
+}
+
+/// handle 的最終路徑（`GetFinalPathNameByHandleW`：展開 junction／symlink、長檔名與實際大小寫）。`volume`
+/// 選磁碟區的寫法：`VOLUME_NAME_NT` 是 NT 裝置路徑，不受磁碟代號對應影響；`VOLUME_NAME_DOS` 是 `\\?\C:\…`。
+fn final_path(file: &File, volume: GETFINALPATHNAMEBYHANDLE_FLAGS) -> AppResult<PathBuf> {
     let handle = HANDLE(file.as_raw_handle());
-    let flags = GETFINALPATHNAMEBYHANDLE_FLAGS(FILE_NAME_NORMALIZED.0 | VOLUME_NAME_NT.0);
+    let flags = GETFINALPATHNAMEBYHANDLE_FLAGS(FILE_NAME_NORMALIZED.0 | volume.0);
     let mut buf = vec![0u16; 512];
     loop {
         // SAFETY: handle 由 file 持有、呼叫期間有效；buf 是本函式持有的可寫緩衝區。
@@ -528,13 +644,33 @@ mod tests {
             std::fs::write(d.join("x.json"), b"").unwrap();
         }
         junction(&a.join("link"), &b);
-        let a_final = final_path(&open_job_dir(&a).unwrap()).unwrap();
+        let a_final = final_path(&open_job_dir(&a).unwrap(), VOLUME_NAME_NT).unwrap();
         let direct = File::open(a.join("x.json")).unwrap();
         let detour = File::open(a.join(r"link\x.json")).unwrap();
-        assert_eq!(final_path(&direct).unwrap().parent(), Some(a_final.as_path()));
-        assert_ne!(final_path(&detour).unwrap().parent(), Some(a_final.as_path()));
+        assert_eq!(final_path(&direct, VOLUME_NAME_NT).unwrap().parent(), Some(a_final.as_path()));
+        assert_ne!(final_path(&detour, VOLUME_NAME_NT).unwrap().parent(), Some(a_final.as_path()));
         assert!(open_job_dir(&a.join("link")).is_err());
         assert!(open_job_dir(&a.join("x.json")).is_err(), "不是目錄");
+    }
+
+    /// 影子上層持有期間，它和它的上層都不能改名；本身是 junction、或路徑中間經過 junction 都拒絕。
+    #[test]
+    fn shadow_parent_is_pinned_and_must_not_pass_through_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(dir.path()).unwrap();
+        let base = PathBuf::from(comparable(&base));
+        let parent = base.join(r"gp\parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        let held = hold_shadow_parent(&parent).expect("一般資料夾");
+        assert!(std::fs::rename(&parent, base.join(r"gp\moved")).is_err(), "上層不能改名");
+        assert!(std::fs::rename(base.join("gp"), base.join("gp2")).is_err(), "再上一層也不能改名");
+        drop(held);
+        std::fs::rename(base.join("gp"), base.join("gp2")).expect("放開後可以改名");
+
+        junction(&base.join("gp"), &base.join("gp2"));
+        assert!(hold_shadow_parent(&base.join("gp")).is_err(), "上層本身是 junction");
+        assert!(hold_shadow_parent(&base.join(r"gp\parent")).is_err(), "路徑經過 junction");
+        assert!(hold_shadow_parent(&base.join(r"gp2\parent")).is_ok());
     }
 
     #[test]
@@ -780,5 +916,47 @@ mod tests {
 
         std::fs::write(&parent.progress, b"").unwrap();
         assert_eq!(parent.run_locked(&parent.job_path, &parent.sha256), EXIT_BUSY);
+    }
+
+    #[test]
+    fn parse_args_accepts_shadow_form_only_with_plain_absolute_paths() {
+        let (install, pack) = (r"C:\Program Files (x86)\SquareEnix\FFXIV", r"C:\Games\xlm-pack");
+        assert_eq!(
+            parse_args(&args(&[SHADOW_FLAG, install, pack])),
+            Invocation::Shadow {
+                install: PathBuf::from(install),
+                pack: PathBuf::from(pack),
+            }
+        );
+        for bad in [
+            vec![SHADOW_FLAG, install],
+            vec![SHADOW_FLAG, install, pack, "extra"],
+            vec![SHADOW_FLAG, install, "pack"],
+            vec![SHADOW_FLAG, r"C:\FFXIV\..\Windows", pack],
+            vec![SHADOW_FLAG, install, r"C:\pack\NUL"],
+            vec![install, SHADOW_FLAG, pack],
+            // 兩個旗標同時出現。
+            vec![SHADOW_FLAG, FLAG, pack],
+            vec![FLAG, SHADOW_FLAG, SHA],
+        ] {
+            assert_eq!(parse_args(&args(&bad)), Invocation::Invalid, "{bad:?}");
+        }
+    }
+
+    /// 影子 helper 先取安裝 mutex 才解析 HKLM（同 patch helper）：持有 mutex 時有效參數停在 11，安裝路徑不存在
+    /// 則在那之前以 10 結束。HKLM 之後的步驟只能手測。
+    #[test]
+    fn shadow_helper_takes_install_lock_before_hklm() {
+        let parent = Parent::new();
+        let pack = parent.dir.path().join("pack");
+        let _held = InstallLock::acquire(&normalize_path(&parent.install).unwrap()).unwrap();
+        let run = |install: PathBuf| {
+            let pack = pack.clone();
+            std::thread::spawn(move || run_shadow_helper(&install, &pack))
+                .join()
+                .unwrap()
+        };
+        assert_eq!(run(parent.install.clone()), EXIT_BUSY);
+        assert_eq!(run(parent.dir.path().join("missing")), EXIT_ABORTED_BEFORE_WRITE);
     }
 }

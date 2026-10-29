@@ -1,5 +1,6 @@
-//! 遊戲更新編排（主 note「設計」）：版本檢查結果（pending）、patch 下載與核對、dirty 標記、
-//! 程序內套用（台服；國際服安裝目前程序就能修改時）與國際服提權 helper（安裝受保護時）。
+//! 遊戲更新編排：版本檢查結果（pending）、patch 下載與核對、dirty 標記、
+//! 程序內套用（台服；國際服在本程式沒有以系統管理員身分執行、且安裝目前程序就能修改時）與國際服提權 helper
+//! （其餘情況）。
 //!
 //! 不變量：
 //! - pending 只存解析後的清單與安裝根目錄，不存 UID／SID。
@@ -67,7 +68,7 @@ pub enum VersionCheck<T> {
     PatchList(RawPatchList),
 }
 
-/// 更新判斷用的 `game\ffxivgame.ver`（主 note「版本來源」）：缺失或空白即
+/// 更新判斷用的 `game\ffxivgame.ver`：缺失或空白即
 /// [`AppError::VersionFileMissing`]，不以 `BASE_GAME_VERSION` 兜底送版本檢查或 session 註冊。
 /// 啟動參數、衛月相容等其他用途仍用 `game::game_version`。
 pub fn required_game_version(region: Region, install: &Path) -> AppResult<String> {
@@ -183,7 +184,7 @@ pub fn store_patch_list(
 }
 
 /// 啟動流程用：無需更新時清掉該區服的 pending 並回傳登入結果；有清單時解析並存成 pending，回
-/// [`AppError::UpdateRequired`]（解析失敗回該錯誤），不繼續啟動（主 note「流程」）。
+/// [`AppError::UpdateRequired`]（解析失敗回該錯誤），不繼續啟動。
 pub fn require_up_to_date<T>(
     pending: &PendingUpdates,
     region: Region,
@@ -309,7 +310,7 @@ pub enum GameUpdateProgress {
 pub type GameUpdateProgressFn = dyn Fn(GameUpdateProgress) + Send + Sync;
 
 /// 下載、核對並套用該區服的 pending 更新。呼叫端須持有 app-wide launch mutex 到回傳為止（國際服經 helper
-/// 時含 UAC 等待與 helper 執行，主 note「互斥」）。國際服完成後由使用者再按一次啟動重新登入（重新取得 OTP），
+/// 時含 UAC 等待與 helper 執行）。國際服完成後由使用者再按一次啟動重新登入（重新取得 OTP），
 /// 這裡不自動登入。取消只在下載與 patch 之間生效。
 pub async fn update_game(
     paths: &AppPaths,
@@ -342,7 +343,9 @@ async fn update_with(
     if running::install_in_use(&install)? {
         return Err(AppError::GameRunning);
     }
-    let route = apply_route(region, || access::may_modify(&AccessToken::current()?, &install))?;
+    let route = apply_route(region, access::process_elevated, || {
+        access::may_modify(&AccessToken::current()?, &install)
+    })?;
 
     let patches = download_all(client, paths, region, &install, &update.patches, progress, cancel).await?;
     let downloaded: Vec<PathBuf> = patches.iter().map(|p| p.path.clone()).collect();
@@ -375,30 +378,34 @@ async fn update_with(
     }
 }
 
-/// 套用方式（主 note「國際服寫入權限」）。
+/// 套用方式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ApplyRoute {
-    /// 本程式程序內套用：台服一律如此；國際服在目前程序就能修改安裝時。
+    /// 本程式程序內套用：台服一律如此；國際服在本程式沒有以系統管理員身分執行、且目前程序就能修改安裝時。
     InProcess,
-    /// 經 UAC 啟動提權 helper：國際服安裝受保護（例如 Program Files）時。
+    /// 經 UAC 啟動提權 helper（本程式已是系統管理員身分時不跳 UAC）：國際服其餘情況。
     Elevated,
 }
 
-/// 只有國際服會呼叫 `may_modify`（目前程序能否修改安裝根目錄或 `game\`，[`access::may_modify`]）。能改就
-/// 不提權：一般權限程序本來就能改那個安裝，交給 helper 只會讓「檢查 junction 到實際寫入」之間被換掉的子目錄
-/// 把系統管理員權限的寫入導到別處。判定失敗回錯誤（尚未下載、未寫任何東西）。
+/// 只有國際服會判定。本程式沒有以系統管理員身分執行（`elevated`，[`access::process_elevated`]）、且目前程序
+/// 能修改安裝根目錄或 `game\`（`may_modify`，[`access::may_modify`]）就不提權：一般權限程序本來就能改那個
+/// 安裝，交給 helper 只會讓「檢查 junction 到實際寫入」之間被換掉的子目錄把系統管理員權限的寫入導到別處。
+/// 以系統管理員身分執行時，目前 token 對受保護與一般權限可修改的安裝都能修改、分不出兩者，所以一律交給
+/// helper，由 helper 以未提權的身分判定，一般權限可修改就拒絕寫入（exit 12）。判定失敗回錯誤（尚未下載、
+/// 未寫任何東西）。
 fn apply_route(
     region: Region,
+    elevated: impl FnOnce() -> AppResult<bool>,
     may_modify: impl FnOnce() -> AppResult<bool>,
 ) -> AppResult<ApplyRoute> {
     Ok(match region {
         Region::Tw => ApplyRoute::InProcess,
-        Region::Global if may_modify()? => ApplyRoute::InProcess,
+        Region::Global if !elevated()? && may_modify()? => ApplyRoute::InProcess,
         Region::Global => ApplyRoute::Elevated,
     })
 }
 
-/// 套用的結果分類（主 note「dirty 標記」）。
+/// 套用的結果分類。
 enum Applied {
     Done,
     /// 失敗的 patch 尚未寫入任何遊戲檔，之前的都已完整套用並寫好 `.ver`：清除標記。
@@ -407,7 +414,7 @@ enum Applied {
     Broken { error: AppError, helper_unknown: bool },
 }
 
-/// 在本程式內套用（不經 helper）：台服安裝一般使用者可寫；國際服安裝目前程序可修改時也走這裡。
+/// 在本程式內套用（不經 helper）：台服安裝一般使用者可寫；國際服見 [`apply_route`]。
 async fn apply_in_process(
     region: Region,
     install: &Path,
@@ -427,7 +434,7 @@ async fn apply_in_process(
                 total: p.total,
             }));
         };
-        apply::apply_patches(&install, &patches, &mut report, &|| token.check().is_err())
+        apply::apply_patches(region, &install, &patches, &mut report, &|| token.check().is_err())
     });
     // 發送端隨 blocking 工作結束而 drop，迴圈在最後一筆進度送出後結束。
     while rx.changed().await.is_ok() {
@@ -450,8 +457,8 @@ async fn apply_in_process(
     }
 }
 
-/// 國際服安裝受保護（目前程序不能修改）時，經 UAC 啟動提權 helper 套用（主 note「國際服寫入權限」）。成敗只看
-/// exit code；進度檔僅供顯示。
+/// 國際服不在程序內套用時（見 [`apply_route`]）經 helper 套用：一般身分執行時跳 UAC，本程式已是系統管理員
+/// 身分時不跳。成敗只看 exit code；進度檔僅供顯示。
 async fn apply_elevated(
     paths: &AppPaths,
     install: &Path,
@@ -527,7 +534,7 @@ fn classify_helper_exit(helper_exit: HelperExit) -> Applied {
             reason: "更新程式在寫入前中止：patch 核對不符、安裝路徑不符或偵測到遊戲執行".into(),
         }),
         HelperExit::InstallModifiable => Applied::Clean(AppError::UpdateAborted {
-            reason: "安裝資料夾不需系統管理員權限就能修改，更新程式拒絕以系統管理員權限寫入".into(),
+            reason: "安裝資料夾不需系統管理員權限就能修改，更新程式拒絕以系統管理員權限寫入（以系統管理員身分執行本程式時會這樣，請以一般身分執行；關閉 UAC 的系統管理員帳號請改用官方啟動器更新）".into(),
         }),
         HelperExit::UacDeclined => Applied::Clean(AppError::UpdateAborted {
             reason: "未同意系統管理員權限".into(),
@@ -732,7 +739,7 @@ async fn fetch_and_verify(
 }
 
 /// 下載一個 patch 到 `dest`。清單長度交給 downloader，在每個整檔回應進入配置（`set_len`）或寫入前
-/// 比對 `Content-Length`（主 note「下載」）；下載完再比一次實際寫入的長度。
+/// 比對 `Content-Length`；下載完再比一次實際寫入的長度。
 async fn download_patch(
     client: &reqwest::Client,
     url: &Url,
@@ -783,7 +790,7 @@ fn patch_client(transport: PatchTransport) -> AppResult<reqwest::Client> {
 }
 
 /// patch 下載用的 client：同 `dalamud::http_client`（HTTP/1.1 讓分段各自一條連線、只設連線與讀取逾時），
-/// 另外只跟隨 [`redirect_rule`] 允許的轉址（主 note「下載」），也不要求壓縮傳輸（`Content-Length` 才會是
+/// 另外只跟隨 [`redirect_rule`] 允許的轉址，也不要求壓縮傳輸（`Content-Length` 才會是
 /// 檔案本身的長度）。與 Dalamud 下載的 client 分開，Dalamud 的行為不受影響。
 fn build_patch_client(
     builder: reqwest::ClientBuilder,
@@ -829,7 +836,7 @@ fn redirect_rule(
     }
 }
 
-/// 下載碟與安裝碟各自至少要有本次 patch 總長的剩餘空間，任一不足即不開始（主 note「下載」）。
+/// 下載碟與安裝碟各自至少要有本次 patch 總長的剩餘空間，任一不足即不開始。
 /// 回傳第一個不足的位置與其剩餘空間。
 fn insufficient_space<'a>(required: u64, volumes: &[(&'a Path, u64)]) -> Option<(&'a Path, u64)> {
     volumes
@@ -1858,36 +1865,41 @@ mod tests {
 
     // ── 國際服：套用方式分流（程序內／helper）與 helper 的結果判定（不啟動 helper、不經 UAC）──────────
 
-    /// 套用方式的分流：台服一律程序內套用、不判定權限；國際服安裝目前程序可修改就程序內套用（不跳 UAC），
-    /// 不可修改才經 helper；判定失敗不是「受保護」，回錯誤、不改走提權。
+    /// 套用方式的分流：台服一律程序內套用、不判定權限；國際服只有本程式沒有以系統管理員身分執行、且安裝目前
+    /// 程序可修改時程序內套用（不跳 UAC），否則經 helper（以系統管理員身分執行時由 helper 以未提權的身分判定）；
+    /// 判定失敗不是「受保護」，回錯誤、不改走提權。
     #[test]
-    fn apply_route_elevates_only_protected_global_install() {
-        let tw = apply_route(Region::Tw, || -> AppResult<bool> { panic!("台服不判定權限") });
-        assert_eq!(tw.expect("tw"), ApplyRoute::InProcess);
-        assert_eq!(
-            apply_route(Region::Global, || Ok(true)).expect("modifiable"),
-            ApplyRoute::InProcess
-        );
-        assert_eq!(
-            apply_route(Region::Global, || Ok(false)).expect("protected"),
-            ApplyRoute::Elevated
-        );
-        let failed = apply_route(Region::Global, || {
+    fn apply_route_elevates_protected_install_or_elevated_process() {
+        let unused = || -> AppResult<bool> { panic!("台服不判定權限") };
+        assert_eq!(apply_route(Region::Tw, unused, unused).expect("tw"), ApplyRoute::InProcess);
+        let route = |elevated: bool, modifiable: bool| {
+            apply_route(Region::Global, || Ok(elevated), || Ok(modifiable)).expect("route")
+        };
+        assert_eq!(route(false, true), ApplyRoute::InProcess, "一般身分、可修改");
+        assert_eq!(route(false, false), ApplyRoute::Elevated, "一般身分、受保護");
+        assert_eq!(route(true, true), ApplyRoute::Elevated, "系統管理員身分、可修改");
+        assert_eq!(route(true, false), ApplyRoute::Elevated, "系統管理員身分、受保護");
+        let denied = || -> AppResult<bool> {
             Err(AppError::Io {
                 context: "讀取權限設定".into(),
                 message: "denied".into(),
             })
-        });
+        };
+        let failed = apply_route(Region::Global, || Ok(false), denied);
+        assert!(matches!(failed, Err(AppError::Io { .. })), "{failed:?}");
+        let failed = apply_route(Region::Global, denied, || Ok(true));
         assert!(matches!(failed, Err(AppError::Io { .. })), "{failed:?}");
     }
 
     /// 國際服安裝在目前程序可修改的位置（tempdir 假安裝）：走程序內套用，不送 Elevate、不啟動 helper，ex1 實際
-    /// patch 套用並推進 `ex1.ver`。先確認判定確實是可修改，判定不符就在呼叫前失敗，不會走到 UAC。
+    /// patch 套用並推進 `ex1.ver`。先確認測試程序不是系統管理員身分、判定確實是可修改，不符就在呼叫前失敗，
+    /// 不會走到 helper。
     #[tokio::test(flavor = "multi_thread")]
     async fn global_modifiable_install_applies_in_process_without_uac() {
         let _processes = GAME_PROCESSES.read().await;
         let dir = tempfile::tempdir().expect("tempdir");
         let fx = TwInstall::create_for(dir.path(), Region::Global);
+        assert!(!access::process_elevated().expect("elevation"), "請以一般身分執行測試");
         let token = AccessToken::current().expect("token");
         assert!(access::may_modify(&token, &fx.install).expect("check"), "假安裝須可修改");
         let stub = serve_files(vec![(EX1_URL_PATH, TW_EX1_PATCH.to_vec())]);
@@ -1916,7 +1928,7 @@ mod tests {
         assert!(seen.iter().any(|p| stage(p) == 3), "{seen:?}");
     }
 
-    /// 主程式只以 helper 的 exit code 判定成敗（主 note「成敗與進度」）。驗收「UAC 拒絕：不留 dirty 標記、
+    /// 主程式只以 helper 的 exit code 判定成敗。驗收「UAC 拒絕：不留 dirty 標記、
     /// 不提示修復」的判定部分：helper 確定沒寫過遊戲目錄（寫入前中止、安裝一般權限可修改、UAC 拒絕、沒能
     /// 啟動）才清除標記，其他（互斥被佔、寫入後失敗、其他 exit code 含被結束與崩潰）保留並提示官方修復。
     #[test]

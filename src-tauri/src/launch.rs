@@ -5,7 +5,7 @@
 //! 客戶端實例上限）在背景觀察（[`EarlyExitWatch`]），觀察到時撤銷執行狀態並以 [`GAME_EXITED_EARLY_EVENT`] 通知前端。
 //! 登入前前端已先準備好衛月（`install_dalamud`）時沿用那次的結果（`dalamud::PreparedCache`），同一次登入不準備兩次。
 //!
-//! 遊戲版本檢查先於衛月相容 gate（主 note「流程」）：goatcorp 會比對遊戲版本，綁 profile 而遊戲是舊版時
+//! 遊戲版本檢查先於衛月相容 gate：goatcorp 會比對遊戲版本，綁 profile 而遊戲是舊版時
 //! 若先準備衛月，會因版本不符退出、走不到更新。台服先送獨立的版本檢查，再準備衛月、登入（登入流程內伺服器
 //! 要求的那次檢查照送）；國際服的清單要登入才拿得到，順序為 boot 檢查 → 登入（含 session 註冊）→ 準備衛月。
 //! 取得 patch list 時解析並存成該區服的 pending，回 `UpdateRequired`、不啟動；更新完成後由使用者再按一次
@@ -69,6 +69,10 @@ pub struct LaunchOutcome {
     pub act_warning: Option<String>,
     /// 遊戲已啟動，但 ACT 連動指令檔（protocols §6.2）沒寫成的原因；寫成為 `None`。
     pub act_target_warning: Option<String>,
+    /// 國際服外部包開啟，但這次以原版遊戲啟動的原因（過期、讀不到、影子建不起來，protocols §1.6）。
+    pub pack_warning: Option<String>,
+    /// 繁中服這次登入回應的剩餘遊戲時間文字（protocols §2.1「剩餘遊戲時間」；取不到是「無法取得」）；國際服為 `None`（§1.4.3）。
+    pub play_time: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -212,7 +216,7 @@ async fn token_then_otp<D>(
     Ok((dialog, code))
 }
 
-/// 啟動前的同步檢查：帳號、遊戲路徑與執行檔，以及 dirty 標記（存在即拒絕，主 note「dirty 標記」）。
+/// 啟動前的同步檢查：帳號、遊戲路徑與執行檔，以及 dirty 標記（存在即拒絕）。
 fn launch_target(paths: &AppPaths, config: &Config, account_id: &str) -> AppResult<(Account, PathBuf)> {
     let account = find_account(config, account_id)?.clone();
     let region = account.region;
@@ -366,7 +370,7 @@ pub async fn launch_account(
     }
 
     let prepared;
-    let game_args = match region {
+    let (game_args, game_exe, pack_warning, play_time) = match region {
         Region::Global => {
             emit_stage(app, account_id, "檢查國際服 boot 版本");
             global::check_boot(&install).await?;
@@ -401,9 +405,29 @@ pub async fn launch_account(
             let check = options.version_check;
             prepared = prepare_profile(app, paths, prepared_cache, account_id, profile.as_ref(), &install, check, cancel)
                 .await?;
+            // 外部包（protocols §1.6）：比對指紋後決定從影子或原資料夾啟動；衛月的版本比對照舊用原資料夾。
+            if config.external_pack.enabled {
+                emit_stage(app, account_id, "準備外部包");
+            }
+            let launch = {
+                let (app, account_id) = (app.clone(), account_id.to_string());
+                let (settings, install) = (config.external_pack.clone(), install.clone());
+                tokio::task::spawn_blocking(move || {
+                    global::shadow::launch_exe(&settings, &install, |root, pack| {
+                        emit_stage(&app, &account_id, "建立影子資料夾（可能跳出 UAC）");
+                        global::shadow::rebuild(root, &install, pack)
+                    })
+                })
+                .await
+                .unwrap_or_else(|e| global::shadow::LaunchExe {
+                    exe: game_exe,
+                    warning: Some(format!("外部包沒有套用（{e}），這次以原版遊戲啟動")),
+                })
+            };
             // 參數以當下的 tick 加密（protocols §1.2），在準備衛月之後、啟動之前才產生。
             let game_version = crate::game::game_version(&install)?;
-            global::launch_args(&session, &game_version, account.language, &extra_args)
+            let args = global::launch_args(&session, &game_version, account.language, &extra_args);
+            (args, launch.exe, launch.warning, None)
         }
         Region::Tw => {
             emit_stage(app, account_id, &format!("檢查{region}遊戲版本"));
@@ -427,7 +451,7 @@ pub async fn launch_account(
             drop(dialog);
             let checked = checked?;
             let session = update::require_up_to_date(pending, region, &install, checked)?;
-            tw::launch_args(&session, &extra_args)
+            (tw::launch_args(&session, &extra_args), game_exe, None, Some(session.play_time))
         }
     };
 
@@ -489,6 +513,8 @@ pub async fn launch_account(
             dalamud_version,
             act_warning,
             act_target_warning,
+            pack_warning,
+            play_time,
         },
         early_exit,
     })

@@ -1,4 +1,4 @@
-//! 角色資料（protocols §7、主 note `docs/specs/2026-10-21-character-data.md`）：列出、備份、還原、轉移。
+//! 角色資料（protocols §7）：列出、備份、還原、轉移。
 //! 寫入互斥由呼叫端在取得 app-wide 鎖之後、第一筆寫入之前以 [`ensure_writable`] 檢查。
 //!
 //! 備份：`<備份根>\FFXIV_CHR<id>\<備份 id>\files\`（角色資料夾頂層的一般檔案）與 `shared\`（區服資料夾的共用檔，
@@ -383,12 +383,23 @@ pub fn ensure_writable(config: &Config, region: Region) -> AppResult<()> {
     Ok(())
 }
 
-/// 其他區服設定的遊戲執行檔（同區服遊戲客戶端判定時排除）。
+/// 其他區服設定的遊戲執行檔（同區服遊戲客戶端判定時排除）；國際服含影子的執行檔（protocols §1.6）。
 pub fn other_region_exes(config: &Config, region: Region) -> Vec<PathBuf> {
     [Region::Global, Region::Tw]
         .into_iter()
         .filter(|&r| r != region)
-        .filter_map(|r| config.games.get(r).map(crate::game::game_exe))
+        .flat_map(|r| {
+            let installed = config.games.get(r).map(crate::game::game_exe);
+            let shadow = match r {
+                Region::Global => config
+                    .games
+                    .get(Region::Global)
+                    .and_then(crate::global::shadow::root_for)
+                    .map(|root| crate::global::shadow::game_exe(&root)),
+                Region::Tw => None,
+            };
+            installed.into_iter().chain(shadow)
+        })
         .collect()
 }
 

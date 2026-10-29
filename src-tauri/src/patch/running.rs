@@ -1,5 +1,5 @@
-//! 程序執行判定（主 note「遊戲執行判定」、protocols §3 例外）：以完整映像路徑比對，不按程序名。
-//! 遊戲：目標安裝的 `game\ffxiv_dx11.exe` 與 `boot\` 下的執行檔，只用於更新互斥；ACT：設定的執行檔，
+//! 程序執行判定（protocols §3 例外）：以完整映像路徑比對，不按程序名。
+//! 遊戲：目標安裝的 `game\ffxiv_dx11.exe`、`boot\` 下的執行檔與國際服影子的執行檔，只用於更新互斥；ACT：設定的執行檔，
 //! 只用於「已在執行就不再開」與畫面狀態。都不用於查找、等待或結束程序。按名稱判定的有兩處：
 //! [`any_named`]：ACT 一鍵設定前確認沒有任何 ACT 在跑（protocols §6.4）；[`game_clients`]：角色資料寫入互斥與
 //! 使用標記（protocols §7.3），名稱為 `ffxiv_dx11.exe` 且不是另一區服遊戲執行檔的程序都算。
@@ -32,10 +32,13 @@ const GAME_EXE: &str = "ffxiv_dx11.exe";
 /// `QueryFullProcessImageNameW` 的緩衝區大小（UTF-16 單位；Windows 路徑長度上限）。
 const IMAGE_PATH_CAP: u32 = 32_768;
 
-/// `install`（安裝根目錄）的 `game\ffxiv_dx11.exe` 或 `boot\` 下任一 `.exe` 是否有程序正在執行。
-/// 映像名稱相符但無法確認路徑的程序算使用中（見模組說明）。
+/// `install`（安裝根目錄）的 `game\ffxiv_dx11.exe`、`boot\` 下任一 `.exe`，或屬於這個安裝的國際服影子執行檔
+/// （protocols §1.6）是否有程序正在執行。映像名稱相符但無法確認路徑的程序算使用中（見模組說明）。
 pub fn install_in_use(install: &Path) -> AppResult<bool> {
-    let targets = Targets::new(&normalize_path(install)?);
+    let mut targets = Targets::new(&normalize_path(install)?);
+    targets.shadow_exe = crate::global::shadow::root_for(install)
+        .and_then(|root| crate::global::shadow::exe_of(&root, install))
+        .and_then(|exe| normalize_path(&exe).ok());
     let names = image_names(install)?;
     any_image_matches(&names, |image| targets.matches(image))
 }
@@ -97,7 +100,7 @@ pub(crate) fn normalize_path(path: &Path) -> AppResult<String> {
 }
 
 /// 只做字面轉換：`\\?\UNC\` → `\\`、去掉 `\\?\`、`/` → `\`、去掉結尾分隔符、轉小寫。
-fn comparable(path: &Path) -> String {
+pub(crate) fn comparable(path: &Path) -> String {
     let text = path.to_string_lossy().replace('/', "\\");
     let text = match text.strip_prefix(r"\\?\UNC\") {
         Some(rest) => format!(r"\\{rest}"),
@@ -110,6 +113,8 @@ fn comparable(path: &Path) -> String {
 struct Targets {
     game_exe: String,
     boot_dir: String,
+    /// 屬於這個安裝的影子執行檔（protocols §1.6）；沒有影子時為 `None`。
+    shadow_exe: Option<String>,
 }
 
 impl Targets {
@@ -117,12 +122,14 @@ impl Targets {
         Self {
             game_exe: format!(r"{root}\game\{GAME_EXE}"),
             boot_dir: format!(r"{root}\boot"),
+            shadow_exe: None,
         }
     }
 
     /// `boot\` 只算直接位於其下的 `.exe`（官方執行檔都在這一層，含台服 `FfxivLauncherTC.exe`）。
     fn matches(&self, image: &str) -> bool {
         image == self.game_exe
+            || self.shadow_exe.as_deref() == Some(image)
             || image
                 .rsplit_once('\\')
                 .is_some_and(|(dir, name)| dir == self.boot_dir && name.ends_with(".exe"))

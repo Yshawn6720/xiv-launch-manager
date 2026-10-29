@@ -1,4 +1,4 @@
-//! 安裝資料夾的修改權判定（主 note「國際服寫入權限」）。parent 據此決定國際服更新在程序內套用或經提權
+//! 安裝資料夾的修改權判定。parent 據此決定國際服更新在程序內套用或經提權
 //! helper；helper 據此拒絕寫入一般權限就能修改的安裝——那種安裝裡，一般權限的程序可以在 helper 檢查
 //! junction（`zipatch::target::ensure_no_link`）與實際寫入之間把子目錄換成 junction，把系統管理員權限的
 //! 寫入導到受保護的位置。
@@ -14,8 +14,8 @@ use windows::Win32::Security::{
     AccessCheck, DACL_SECURITY_INFORMATION, DuplicateToken, GENERIC_MAPPING,
     GROUP_SECURITY_INFORMATION, GetFileSecurityW, GetTokenInformation, LABEL_SECURITY_INFORMATION,
     OWNER_SECURITY_INFORMATION, PRIVILEGE_SET, PSECURITY_DESCRIPTOR, SecurityIdentification,
-    TOKEN_DUPLICATE, TOKEN_ELEVATION_TYPE, TOKEN_LINKED_TOKEN, TOKEN_QUERY, TokenElevationType,
-    TokenElevationTypeFull, TokenLinkedToken,
+    TOKEN_DUPLICATE, TOKEN_ELEVATION, TOKEN_ELEVATION_TYPE, TOKEN_LINKED_TOKEN, TOKEN_QUERY, TokenElevation,
+    TokenElevationType, TokenElevationTypeFull, TokenLinkedToken,
 };
 use windows::Win32::Storage::FileSystem::{
     DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ALL_ACCESS, FILE_DELETE_CHILD,
@@ -87,16 +87,42 @@ impl AccessToken {
     }
 }
 
+/// 目前程序是否以系統管理員權限執行（UAC 提權，或沒有分割 token 的系統管理員帳號）。
+pub(crate) fn process_elevated() -> AppResult<bool> {
+    let process = process_token()?;
+    let mut elevation = TOKEN_ELEVATION::default();
+    let mut len = 0u32;
+    // SAFETY: process 含 TOKEN_QUERY；輸出緩衝區是本函式存活中的區域變數，長度即其大小。
+    // quality-allow: Win32 FFI，GetTokenInformation 沒有安全包裝
+    unsafe {
+        GetTokenInformation(
+            process.get(),
+            TokenElevation,
+            Some((&raw mut elevation).cast()),
+            size_of::<TOKEN_ELEVATION>() as u32,
+            &mut len,
+        )
+    }
+    .map_err(|e| win_error("讀取程序的提權狀態", e))?;
+    Ok(elevation.TokenIsElevated != 0)
+}
+
 /// `token` 能否修改 `install`：安裝根目錄或套用根目錄 `game\` 任一處有 [`MODIFY_RIGHTS`] 任一項即是。
 /// 只看這兩層（套用只寫 `{install}\game` 之內，protocols §5.4.5；不寫 `boot\`）；個別子目錄另外放寬的權限
 /// 不在判定內。讀不到 security descriptor（例如資料夾不存在）回錯誤，由呼叫端失敗關閉。
 pub(crate) fn may_modify(token: &AccessToken, install: &Path) -> AppResult<bool> {
     for dir in apply_dirs(install) {
-        if granted_access(token, &dir)? & MODIFY_RIGHTS != 0 {
+        if may_modify_dir(token, &dir)? {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+/// `token` 對 `dir` 這一層是否有 [`MODIFY_RIGHTS`] 任一項（protocols §1.6：影子上層資料夾）。讀不到 security
+/// descriptor 回錯誤。
+pub(crate) fn may_modify_dir(token: &AccessToken, dir: &Path) -> AppResult<bool> {
+    Ok(granted_access(token, dir)? & MODIFY_RIGHTS != 0)
 }
 
 fn apply_dirs(install: &Path) -> [PathBuf; 2] {

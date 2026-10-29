@@ -76,9 +76,20 @@ export interface ConfigView {
   /** 遊戲仍在執行中的帳號 id。 */
   accountsRunning: string[];
   ui: UiSettings;
+  externalPack: ExternalPack;
 }
 
-/** 設定 › 介面 › 主題（Rust `Theme`）：system＝跟隨系統。 */
+/**
+ * 國際服外部包（Rust `ExternalPack`，protocols §1.6）：字體包、漢化包所在的資料夾。開啟時國際服從影子資料夾啟動，
+ * 安裝資料夾維持官方原檔。riskAccepted＝使用者已確認過風險（只確認一次）。
+ */
+export interface ExternalPack {
+  dir: string | null;
+  enabled: boolean;
+  riskAccepted: boolean;
+}
+
+/** 設定 › 介面 › 主題（Rust `Theme`）：system＝跟隨系統；設定檔沒有這一欄時是 dark。 */
 export type Theme = "system" | "dark" | "light";
 
 /** 設定 › 介面 › 遊戲啟動後（Rust `AfterLaunch`）：keep＝不動作；tray＝縮到系統匣。 */
@@ -229,6 +240,10 @@ export interface LaunchOutcome {
   actWarning: string | null;
   /** 遊戲已啟動，但 ACT 連動指令檔沒寫成的原因（完整句子）；寫成為 null。 */
   actTargetWarning: string | null;
+  /** 國際服外部包已開啟，但這次以原版遊戲啟動的原因（完整句子；過期、讀不到、沒同意 UAC 等）；有套用或沒開啟為 null。 */
+  packWarning: string | null;
+  /** 繁中服這次登入時的剩餘遊戲時間文字（例「剩餘約 30 天」，取不到是「無法取得」）；國際服為 null。 */
+  playTime: string | null;
 }
 
 /** 一組 ACT（Advanced Combat Tracker）設定。 */
@@ -459,13 +474,26 @@ export const api = {
   getGlobalNews: (language: GlobalLanguage) => invoke<NewsItem[]>("get_global_news", { language }),
   /** 以系統瀏覽器開啟 region 的消息；後端只接受該服官方網站白名單內的 https 網址，其他一律拒絕。 */
   openNews: (region: Region, url: string) => invoke<void>("open_news", { region, url }),
+  /** 以系統瀏覽器開啟 region 的官方商城（國際服 Mog Station、繁中服水晶商城）；網址由後端決定。 */
+  openShop: (region: Region) => invoke<void>("open_shop", { region }),
   setGamePath: (region: Region, path: string | null) =>
     invoke<void>("set_game_path", { region, path }),
   /** 儲存主題並套到視窗標題列與 WebView2 的 prefers-color-scheme；頁面的 data-theme 由前端自己切。 */
   setTheme: (theme: Theme) => invoke<void>("set_theme", { theme }),
   /** 儲存「遊戲啟動後」；下次本程式成功啟動遊戲時生效。 */
   setAfterLaunch: (afterLaunch: AfterLaunch) => invoke<void>("set_after_launch", { afterLaunch }),
+  /**
+   * 儲存國際服外部包。只在 enabled 時檢查資料夾（不合格回給使用者看的原因）；還沒確認過風險時，開啟要帶
+   * acceptRisk=true，否則後端拒絕。確認只記一次。
+   */
+  setExternalPack: (dir: string | null, enabled: boolean, acceptRisk: boolean) =>
+    invoke<void>("set_external_pack", { dir, enabled, acceptRisk }),
   detectGamePath: (region: Region) => invoke<string | null>("detect_game_path", { region }),
+  /**
+   * 開系統的選擇資料夾對話框（主視窗為擁有者，title 是對話框標題，start 存在時從那裡開始）；回傳選到的路徑，取消為 null。
+   * 只回傳路徑、不儲存。
+   */
+  pickFolder: (title: string, start: string | null) => invoke<string | null>("pick_folder", { title, start }),
   /** 只改帳號套用的 Dalamud 設定檔；回傳綁定後的設定檔 id，none 為 null。 */
   setAccountProfile: (accountId: string, target: BindTarget) =>
     invoke<string | null>("set_account_profile", { accountId, target }),

@@ -18,7 +18,12 @@ interface NewsSource {
 }
 const newsCache = new Map<string, NewsState>();
 /** accountPane() 新建的面板；抓取結果回來，或區服、語言改了時就地更新，不重繪整個登入頁。 */
-let newsPanel: { root: HTMLElement; title: HTMLElement; body: HTMLElement } | null = null;
+let newsPanel: { root: HTMLElement; title: HTMLElement; shop: HTMLButtonElement; body: HTMLElement } | null = null;
+
+const SHOP_TITLE: Record<Region, string> = {
+  global: "以瀏覽器開啟國際服 Mog Station（水晶商城）",
+  tw: "以瀏覽器開啟繁中服水晶商城",
+};
 
 function newsSource(d: LoginDraft): NewsSource {
   return { region: d.region, language: d.language, key: d.region === "global" ? `global-${d.language}` : "tw" };
@@ -54,9 +59,10 @@ export function paintNews(): void {
     loadNews(src);
     return;
   }
-  const { root, title, body } = newsPanel;
+  const { root, title, shop, body } = newsPanel;
   root.className = `news-group ${src.region}`;
   title.textContent = `${regionLabel(src.region)}消息`;
+  shop.title = SHOP_TITLE[src.region];
   switch (s.kind) {
     case "loading":
       body.replaceChildren(h("p", { class: "news-note" }, "載入中…"));
@@ -88,17 +94,35 @@ function newsItem(region: Region, n: NewsItem): HTMLElement {
   return h("li", {}, b);
 }
 
-/** 側欄帳號清單下方的消息面板：區服色底與細條，標題（圖示＋「國際服消息」／「繁中服消息」）用區服色。 */
+/**
+ * 側欄帳號清單下方的消息面板：區服色底與細條，標題列左邊是圖示＋「國際服消息」／「繁中服消息」（區服色），右邊是「水晶商城」
+ * （protocols §1.4.3、§2.8；全程式唯一的商城入口），開同一個區服的官方商城。
+ */
 export function newsGroup(): HTMLElement {
   const title = h("span");
+  const shop = h(
+    "button",
+    { type: "button", class: "secondary shop-button" },
+    h("span", { class: "shop-icon", "aria-hidden": "true" }),
+    "水晶商城",
+  );
+  // 同開消息：不走 run()，失敗只顯示訊息。跟著面板目前的區服（draft 換區服時 paintNews 會更新標題與 title）。
+  shop.addEventListener("click", () => {
+    if (draft) api.openShop(draft.region).catch((e: unknown) => say(errorText(e), "error"));
+  });
   const body = h("div", { class: "news-body" });
   const root = h(
     "section",
     { class: "news-group", "aria-labelledby": "news-title" },
-    h("h3", { class: "news-title", id: "news-title" }, h("span", { class: "news-icon", "aria-hidden": "true" }), title),
+    h(
+      "div",
+      { class: "news-head" },
+      h("h3", { class: "news-title", id: "news-title" }, h("span", { class: "news-icon", "aria-hidden": "true" }), title),
+      shop,
+    ),
     body,
   );
-  newsPanel = { root, title, body };
+  newsPanel = { root, title, shop, body };
   paintNews();
   return root;
 }

@@ -1140,6 +1140,15 @@ main > #tab-login {
   border-top: 1px solid var(--border);
 }
 
+/* 標題列：左邊標題，右邊「水晶商城」（news.ts）。 */
+.news-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding-right: var(--space-2);
+}
+
 .news-title {
   display: flex;
   align-items: center;
@@ -1260,11 +1269,10 @@ button.news-retry:hover:not(:disabled) {
 }
 
 /*
- * 內容區頂部的頁首：名稱與同一行的區服 badge（基線對齊），已存帳號最右側是「⋯」選單；
- * 下方細分隔線與欄位隔開。區服跟著 badge（新增帳號切換區服時也跟著變）。
+ * 內容區頂部的頁首：名稱與同一行的區服 badge（基線對齊），繁中服登入成功過的帳號再接「遊戲時間」標籤；已存帳號最右側是
+ * 「⋯」選單；下方細分隔線與欄位隔開。
  */
 .login-head {
-  --region: var(--region-global);
   display: flex;
   align-items: center;
   gap: var(--space-4);
@@ -1273,8 +1281,66 @@ button.news-retry:hover:not(:disabled) {
   border-bottom: 1px solid var(--border);
 }
 
-.login-head:has(.badge.tw) {
-  --region: var(--region-tw);
+/*
+ * 頁首的「遊戲時間」：badge 的膠囊外形，但用一般文字色疊在 --raised 上（不用區服色，免得和旁邊的區服 badge 混成同一種標記，
+ * 也不做成按鈕）；剩餘時間粗體、比標籤字大一階，取得時間 muted 小字。對比同表單文字（--fg／--muted 疊 --raised）。
+ */
+.play-time {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 3px var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--raised);
+  color: var(--muted);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+  align-self: center;
+}
+
+.play-time-value {
+  color: var(--fg);
+  font-size: var(--text-sm);
+  font-weight: 700;
+}
+
+/* 時鐘圖示（純裝飾）：圓框＋兩根指針，全用 currentColor。 */
+.play-time-icon {
+  flex: none;
+  box-sizing: border-box;
+  width: 13px;
+  height: 13px;
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+  background:
+    linear-gradient(currentColor 0 0) 4.75px 2px / 1.5px 4.5px no-repeat,
+    linear-gradient(currentColor 0 0) 4.75px 5px / 3.5px 1.5px no-repeat;
+}
+
+/* 側欄消息標題列的「水晶商城」：secondary 的形狀，改用區服色（.news-group 的 --region）的字、框與淡底，一眼可見；圖示是區服色的菱形水晶。 */
+button.secondary.shop-button {
+  flex: none;
+  border-color: color-mix(in srgb, var(--region) 55%, transparent);
+  background: color-mix(in srgb, var(--region) 12%, var(--raised));
+  color: var(--region);
+  font-weight: 600;
+}
+
+button.secondary.shop-button:hover:not(:disabled) {
+  border-color: var(--region);
+  background: color-mix(in srgb, var(--region) 22%, var(--raised));
+}
+
+.shop-icon {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin: 0 3px;
+  border-radius: 1px;
+  background: currentColor;
+  transform: rotate(45deg);
 }
 
 /* 名稱（或重新命名的輸入框）與 badge 同一行、基線對齊；佔滿頁首剩下的寬度，「⋯」靠右。 */
@@ -2272,8 +2338,9 @@ details.menu.menu-icon[open] > summary {
   color: var(--error);
 }
 
-/* 「ACT 連動與雙開」底部的「運作方式」：與上方提醒隔開。 */
-.act-link-how {
+/* 「ACT 連動與雙開」底部的「運作方式」、「國際服外部包」底部的「說明」：與上方的列隔開。 */
+.act-link-how,
+.pack-guide {
   margin-top: var(--space-3);
 }
 

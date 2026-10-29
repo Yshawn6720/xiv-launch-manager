@@ -1,4 +1,4 @@
-//! 「角色」分頁的 commands（主 note `docs/specs/2026-10-21-character-data.md`）。共用狀態在 `commands::AppState`。
+//! 「角色」分頁的 commands。共用狀態在 `commands::AppState`。
 
 use std::path::PathBuf;
 

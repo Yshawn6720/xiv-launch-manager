@@ -955,7 +955,7 @@ fn rejects_decompressed_length_mismatch() {
     }
 }
 
-// ── 套用中的共用（主 note「遊戲執行判定」） ─────────────────────────────────────
+// ── 套用中的共用 ─────────────────────────────────────
 
 const DAT0: &str = "sqpack/ex1/030100.win32.dat0";
 const DAT1: &str = "sqpack/ex1/030100.win32.dat1";
