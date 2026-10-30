@@ -47,6 +47,7 @@ const SAFETY_GROUPS: readonly { title: string; items: readonly SafetyItem[] }[] 
           "goatcorp：國際服 Dalamud 與其 .NET runtime、assets、遠端暫停狀態、遊戲檔完整性對照",
           "GitHub 上的 yanmucorp：繁中服 Dalamud 與 assets；NuGet：繁中服 Dalamud 需要的 .NET runtime",
           "GitHub：本程式的更新",
+          "demo.xivtc.com（Cloudflare）：按「看示範影片」時才在本程式內串流播放示範影片",
           "GitHub 上的 ravahn/FFXIV_ACT_Plugin：查詢 FFXIV 插件的最新版本號（只查版本、不下載；本程式開著時，距上次查詢未滿一小時就沿用上次結果，按「檢查插件更新」才重查）",
           "以及上述來源清單裡列出的下載位置（例如 Dalamud assets 的個別檔案）",
         ],
@@ -66,6 +67,37 @@ const SAFETY_GROUPS: readonly { title: string; items: readonly SafetyItem[] }[] 
     ],
   },
 ];
+
+// ---------- 示範影片 ----------
+
+/** 從 R2 串流，不打包進程式；CSP 的 media-src 只放行這個主機，換主機要一起改 tauri.conf.json。 */
+const PACK_DEMO_URL = "https://demo.xivtc.com/xlm/xlm-shadow-folder.mp4";
+const demoDialog = document.getElementById("demo-dialog") as HTMLDialogElement;
+const demoVideo = document.getElementById("demo-video") as HTMLVideoElement;
+const demoError = document.getElementById("demo-error") as HTMLParagraphElement;
+
+// 離線或來源失效時顯示說明，不留一塊黑框。
+demoVideo.addEventListener("error", () => {
+  demoError.hidden = false;
+});
+// 點對話框外（backdrop）關閉：點在 backdrop 上時 target 是 dialog 本身。
+demoDialog.addEventListener("click", (e) => {
+  if (e.target === demoDialog) demoDialog.close();
+});
+// 關閉鈕、Esc、點背景都走 close：停止播放並卸下來源，不在背景繼續下載。
+demoDialog.addEventListener("close", () => {
+  demoVideo.pause();
+  demoVideo.removeAttribute("src");
+  demoVideo.load();
+});
+
+function openPackDemo(): void {
+  demoError.hidden = true;
+  demoVideo.src = PACK_DEMO_URL;
+  demoDialog.showModal();
+  // 自動播放被擋時留在暫停，使用者按播放即可；載入失敗由 error 事件處理。
+  demoVideo.play().catch((e: unknown) => console.warn("示範影片未自動播放", e));
+}
 
 function safetyItem(item: SafetyItem): HTMLElement {
   if (typeof item === "string") return h("li", {}, item);
@@ -297,11 +329,8 @@ function externalPackBlock(): HTMLElement {
       return on ? "已開啟國際服外部包，下次登入國際服時套用" : "已關閉國際服外部包，國際服改以原版遊戲啟動";
     }).then(() => document.getElementById(toggleId)?.focus());
   });
-  // 開瀏覽器不走 run()：不重繪，失敗只顯示訊息（同 openFolder）。
   const demo = h("button", { class: "link", type: "button" }, "看示範影片");
-  demo.addEventListener("click", () => {
-    api.openPackDemo().catch((e: unknown) => say(errorText(e), "error"));
-  });
+  demo.addEventListener("click", openPackDemo);
   const guide = h(
     "details",
     { class: "editor-advanced pack-guide" },
@@ -309,7 +338,7 @@ function externalPackBlock(): HTMLElement {
     h(
       "div",
       { class: "editor-advanced-body" },
-      h("p", { class: "hint" }, demo, "：在瀏覽器開啟使用說明，影片約 30 秒，示範從選資料夾到開啟的步驟。"),
+      h("p", { class: "hint" }, demo, "：影片約 30 秒，示範從選資料夾到開啟的步驟。"),
       packNote(
         "要放什麼：",
         "把要替換的 sqpack 檔直接放在這個資料夾（不用子資料夾），檔名和遊戲 game\\sqpack\\ffxiv\\ 裡的官方檔相同，例如字體包 000000.win32.dat0、.index、.index2，漢化包 0a0000.win32.dat0、.index、.index2。每組至少要有 .dat0 和 .index，其他檔案不理會。",

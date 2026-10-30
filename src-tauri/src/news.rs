@@ -72,15 +72,6 @@ pub fn open_shop(region: Region) -> AppResult<()> {
     open_in_browser(shop_url(region))
 }
 
-/// 公開 repo README「國際服字體與漢化包」段（示範影片放在這段）。錨點是 GitHub 依標題產生的 id，中文以 UTF-8
-/// percent-encoding 寫出；README 改標題時要一起改（測試核對）。
-const PACK_DEMO_URL: &str = "https://github.com/Yshawn6720/xiv-launch-manager#%E5%9C%8B%E9%9A%9B%E6%9C%8D%E5%AD%97%E9%AB%94%E8%88%87%E6%BC%A2%E5%8C%96%E5%8C%85";
-
-/// 以系統預設瀏覽器開啟外部包示範影片（`open_pack_demo` command）；網址是常數，不收前端傳來的網址。
-pub fn open_pack_demo() -> AppResult<()> {
-    open_in_browser(PACK_DEMO_URL)
-}
-
 /// 以 `ShellExecuteExW`（verb `open`，與 ACT 相同）把 `url` 交給 https 的預設處理程式，不經 shell。不用開資料夾的
 /// `explorer.exe <URL>`：2026-10-14 本機（Windows 11 build 26300）實測它會開出「文件」資料夾，不會開瀏覽器。
 fn open_in_browser(url: &str) -> AppResult<()> {
@@ -154,31 +145,5 @@ mod tests {
         for (region, expected) in cases {
             assert_eq!(shop_url(region), expected, "{region}");
         }
-    }
-
-    /// 錨點必須對到 README 裡唯一一個同名的二級標題：GitHub 遇到重名標題會加 `-1` 後綴，改標題則錨點失效，
-    /// 兩種情況瀏覽器都只會停在頁首。
-    #[test]
-    fn pack_demo_opens_the_readme_section_that_exists() {
-        let url = Url::parse(PACK_DEMO_URL).expect("parse");
-        assert_eq!(url.scheme(), "https");
-        assert_eq!(url.host_str(), Some("github.com"));
-        assert_eq!(url.path(), "/Yshawn6720/xiv-launch-manager");
-        let encoded = url.fragment().expect("fragment").as_bytes();
-        let mut bytes = Vec::new();
-        let mut i = 0;
-        while i < encoded.len() {
-            if encoded[i] == b'%' {
-                let hex = std::str::from_utf8(&encoded[i + 1..i + 3]).expect("hex");
-                bytes.push(u8::from_str_radix(hex, 16).expect("hex"));
-                i += 3;
-            } else {
-                bytes.push(encoded[i]);
-                i += 1;
-            }
-        }
-        let heading = format!("## {}", String::from_utf8(bytes).expect("utf8"));
-        let readme = include_str!("../../README.md");
-        assert_eq!(readme.lines().filter(|l| l.trim_end() == heading).count(), 1, "{heading}");
     }
 }

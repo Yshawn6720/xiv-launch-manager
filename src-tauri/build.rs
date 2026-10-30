@@ -15,7 +15,6 @@ const COMMANDS: &[&str] = &[
     "get_global_news",
     "open_news",
     "open_shop",
-    "open_pack_demo",
     "save_account",
     "set_account_profile",
     "import_detected_profile",

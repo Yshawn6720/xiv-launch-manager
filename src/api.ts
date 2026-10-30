@@ -478,8 +478,6 @@ export const api = {
   openNews: (region: Region, url: string) => invoke<void>("open_news", { region, url }),
   /** 以系統瀏覽器開啟 region 的官方商城（國際服 Mog Station、繁中服水晶商城）；網址由後端決定。 */
   openShop: (region: Region) => invoke<void>("open_shop", { region }),
-  /** 以系統瀏覽器開啟 README 的國際服外部包示範影片段；網址由後端決定。 */
-  openPackDemo: () => invoke<void>("open_pack_demo"),
   setGamePath: (region: Region, path: string | null) =>
     invoke<void>("set_game_path", { region, path }),
   /** 儲存主題並套到視窗標題列與 WebView2 的 prefers-color-scheme；頁面的 data-theme 由前端自己切。 */

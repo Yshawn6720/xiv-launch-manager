@@ -2641,6 +2641,20 @@ dialog .actions {
   margin-top: var(--space-4);
 }
 
+/* 示範影片：16:9，寬度隨視窗縮，不超過影片原寸 1280px。 */
+.demo-dialog video {
+  display: block;
+  width: min(1280px, 80vw);
+  aspect-ratio: 16 / 9;
+  background: #000;
+  border-radius: var(--radius-sm);
+}
+
+.demo-dialog p {
+  margin: var(--space-3) 0 0;
+  color: var(--error);
+}
+
 /* ---------- 表單元件：圓角 --radius-sm、focus ring --focus-ring（offset 2px）、過場 --ease，全部一致 ---------- */
 
 input,

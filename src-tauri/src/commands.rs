@@ -326,12 +326,6 @@ pub fn open_shop(region: Region) -> AppResult<()> {
     crate::news::open_shop(region)
 }
 
-/// 以系統預設瀏覽器開啟 README 的國際服外部包示範影片段；網址是後端常數。同步 command 的理由同 [`open_news`]。
-#[tauri::command]
-pub fn open_pack_demo() -> AppResult<()> {
-    crate::news::open_pack_demo()
-}
-
 /// 不 derive `Debug`：`password`／`otp_secret` 是 secret，不得出現在任何 Debug／log 輸出。
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]

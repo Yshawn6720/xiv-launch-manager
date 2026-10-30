@@ -1,6 +1,6 @@
 [package]
 name = "xiv-launch-manager"
-version = "0.4.5"
+version = "0.4.6"
 description = "FFXIV 啟動管理器：多區服帳號與 Dalamud 版本管理"
 license = "Apache-2.0"
 authors = ["shawn_lin"]

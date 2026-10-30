@@ -94,7 +94,6 @@ pub fn run() {
             commands::get_global_news,
             commands::open_news,
             commands::open_shop,
-            commands::open_pack_demo,
             commands::save_account,
             commands::set_account_profile,
             commands::import_detected_profile,
