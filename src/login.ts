@@ -60,6 +60,7 @@ import { otpPreview, secretView, type SecretState } from "./login-secret";
 import { currentTab } from "./main";
 import { newsGroup, paintNews } from "./news";
 import { paintProgress, progressState, type ProgressState, progressView, type ProgressView } from "./progress";
+import { noteLaunch } from "./running-status";
 import { lockIcon, moreMenu, renameInPlace } from "./widgets";
 
 // ---------- 登入 ----------
@@ -396,6 +397,23 @@ function playTimeTag(p: { text: string; at: Date }): HTMLElement {
   );
 }
 
+/** 側欄帳號名稱旁的「遊戲執行中」標記（帳號標頭的最後一個子元素）。 */
+function runningBadge(): HTMLElement {
+  return h("span", { class: "status-dot" }, "遊戲執行中");
+}
+
+/** 依 config.accountsRunning 就地增減側欄的「遊戲執行中」標記；不重繪整個登入頁，免得打斷正在輸入的表單。 */
+export function paintAccountsRunning(): void {
+  for (const a of config.accounts) {
+    const head = document.getElementById(`account-${a.id}`)?.querySelector(".account-item-head");
+    if (!head) continue;
+    const badge = head.querySelector(":scope > .status-dot");
+    const running = config.accountsRunning.includes(a.id);
+    if (running && !badge) head.append(runningBadge());
+    else if (!running && badge) badge.remove();
+  }
+}
+
 /** 左欄：兩服伺服器狀態與依區服分組的帳號清單（點選即切換右側登入表單的帳號），最下方是目前區服的官方消息。 */
 function accountPane(selected: AccountView | null): HTMLElement {
   // 伺服器狀態：有該服分組時接在分組標題右側（標題已寫區服，這裡只寫「伺服器」）；
@@ -424,7 +442,7 @@ function accountPane(selected: AccountView | null): HTMLElement {
         ...(x.hasPassword
           ? []
           : [h("span", { class: "account-item-flag", title: "密碼未儲存" }, lockIcon(false), h("span", { class: "visually-hidden" }, "密碼未儲存"))]),
-        ...(config.accountsRunning.includes(x.id) ? [h("span", { class: "status-dot" }, "遊戲執行中")] : []),
+        ...(config.accountsRunning.includes(x.id) ? [runningBadge()] : []),
       ),
       h("span", { class: "account-item-meta" }, x.username),
     ];
@@ -1111,7 +1129,10 @@ export function renderLogin(): void {
         const started = `已啟動 ${label}（pid ${r.pid}）${loaded}`;
         // 遊戲已啟動，但 ACT 沒開起來、ACT 連動沒更新，或外部包沒套用：附上原因，不用錯誤樣式。
         const notes = [r.actWarning, r.actTargetWarning, r.packWarning].filter((w): w is string => w !== null);
-        return notes.length ? { text: [started, ...notes].join("；"), kind: "" } : started;
+        const result = notes.length ? { text: [started, ...notes].join("；"), kind: "" as const } : started;
+        // 這段文字留在訊息列；遊戲關掉後輪詢會改成「已結束」。
+        noteLaunch({ accountId: id, pid: r.pid, label, text: typeof result === "string" ? result : result.text });
+        return result;
       } catch (e) {
         const raw = errorText(e);
         const cancelled = raw === CANCELLED_MESSAGE;

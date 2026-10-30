@@ -86,6 +86,11 @@ export function say(text: string, kind: "ok" | "error" | "" = ""): void {
   message.className = kind;
 }
 
+/** 訊息列目前的文字。 */
+export function shownMessage(): string {
+  return message.textContent ?? "";
+}
+
 export function errorText(e: unknown): string {
   return typeof e === "string" ? e : e instanceof Error ? e.message : String(e);
 }

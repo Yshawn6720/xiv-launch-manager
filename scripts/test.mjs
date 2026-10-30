@@ -9,7 +9,7 @@
 // CARGO_MANIFEST_DIR／CARGO_PKG_* 等程式碼只在編譯期（env!）讀、runtime 沒讀，故不補；PATH 的 dylib
 // 搜尋路徑也不補（測試 exe 只匯入系統 DLL，移到別的目錄不影響載入）。doc-test 仍交給 `cargo test --doc`
 // （rustdoc 把 doc-test 編到暫存目錄，無法固定路徑）。與 cargo 相同，某個測試 exe 失敗就停、以其結束碼結束。
-// 只用 Node 內建模組；子程序一律 argv 陣列、不經 shell。
+// 只用 Node 內建模組；子程序一律 argv 陣列、不經 shell。Rust 全過後再跑 `node --test "test/*.test.mjs"`（前端純邏輯測試）。
 import { spawnSync } from "node:child_process";
 import { copyFileSync, mkdirSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
@@ -96,4 +96,9 @@ for (const [i, { src, packageDir }] of tests.entries()) {
   if (code !== 0) process.exit(code);
 }
 const doc = spawnSync("cargo", ["test", "--manifest-path", MANIFEST, "--doc", "--", ...args], { cwd: ROOT, stdio: "inherit" });
-process.exit(exitCode(doc, "cargo test --doc"));
+const docCode = exitCode(doc, "cargo test --doc");
+if (docCode !== 0) process.exit(docCode);
+// 前端純邏輯測試（test/*.test.mjs，Node 內建 test runner 直接載入 .ts，需 Node 22.18+）；libtest 參數不適用，一律全跑。
+// 傳目錄 `test/` 會被當成單一模組載入而失敗，要用 glob（node 自己展開，不經 shell）。
+const web = spawnSync(process.execPath, ["--test", "test/*.test.mjs"], { cwd: ROOT, stdio: "inherit" });
+process.exit(exitCode(web, "node --test test/*.test.mjs"));

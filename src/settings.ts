@@ -297,6 +297,11 @@ function externalPackBlock(): HTMLElement {
       return on ? "已開啟國際服外部包，下次登入國際服時套用" : "已關閉國際服外部包，國際服改以原版遊戲啟動";
     }).then(() => document.getElementById(toggleId)?.focus());
   });
+  // 開瀏覽器不走 run()：不重繪，失敗只顯示訊息（同 openFolder）。
+  const demo = h("button", { class: "link", type: "button" }, "看示範影片");
+  demo.addEventListener("click", () => {
+    api.openPackDemo().catch((e: unknown) => say(errorText(e), "error"));
+  });
   const guide = h(
     "details",
     { class: "editor-advanced pack-guide" },
@@ -304,6 +309,7 @@ function externalPackBlock(): HTMLElement {
     h(
       "div",
       { class: "editor-advanced-body" },
+      h("p", { class: "hint" }, demo, "：在瀏覽器開啟使用說明，影片約 30 秒，示範從選資料夾到開啟的步驟。"),
       packNote(
         "要放什麼：",
         "把要替換的 sqpack 檔直接放在這個資料夾（不用子資料夾），檔名和遊戲 game\\sqpack\\ffxiv\\ 裡的官方檔相同，例如字體包 000000.win32.dat0、.index、.index2，漢化包 0a0000.win32.dat0、.index、.index2。每組至少要有 .dat0 和 .index，其他檔案不理會。",

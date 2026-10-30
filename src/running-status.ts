@@ -1,6 +1,9 @@
 import { api, regionLabel, type ActStatus, type ActStatusByRegion, type RunningGame } from "./api";
 import { paintActStatus } from "./act";
-import { accountLabel, config, errorText, h, REGIONS } from "./app";
+import { accountLabel, config, errorText, h, REGIONS, say, shownMessage } from "./app";
+import { paintProfilesInUse } from "./dalamud";
+import { paintAccountsRunning } from "./login";
+import { type LaunchNotice, syncRunning } from "./running-sync";
 
 // ---------- 執行狀態：header 狀態列；ACT 子分頁共用同一份結果 ----------
 
@@ -16,6 +19,14 @@ let runningStatusSeq = 0;
 let runningStatusTimer: number | undefined;
 /** header 目前畫出的內容；沒變就不重建，免得 role=status 每次輪詢都重念。 */
 let runningStatusShown = "";
+/** 最近一次登入成功時訊息列的啟動結果；該遊戲結束後輪詢會改寫訊息列。 */
+let launchNotice: LaunchNotice | null = null;
+
+/** 登入成功、即將在訊息列顯示啟動結果時記下。登入前發出、晚到的輪詢結果看不到新遊戲，作廢以免誤判成已結束。 */
+export function noteLaunch(notice: LaunchNotice): void {
+  launchNotice = notice;
+  runningStatusSeq++;
+}
 
 /** header 第一行的 ACT 狀態文字；null＝尚未設定 ACT，只寫區服名稱。 */
 const HEADER_ACT: Record<ActStatus, { text: string; cls: string } | null> = {
@@ -90,6 +101,15 @@ export function refreshRunningStatus(): void {
       runningGames = s.games;
       paintRunningStatus();
       paintActStatus();
+      // 側欄標記、設定檔「使用中」與訊息列原本只在重繪時更新；遊戲正常關閉沒有事件，靠這裡撤銷。
+      if (config === undefined) return;
+      const sync = syncRunning(launchNotice, shownMessage(), s.games, s.profilesInUse);
+      config.accountsRunning = sync.accountsRunning;
+      config.profilesInUse = sync.profilesInUse;
+      // 每次都畫：config 也會被重繪或更新前的重讀換掉，不能拿它判斷畫面是否已同步；沒變時不動 DOM。
+      paintAccountsRunning();
+      paintProfilesInUse();
+      if (sync.message !== null) say(sync.message);
     },
     (e: unknown) => {
       if (seq === runningStatusSeq) console.warn(`查詢執行狀態失敗：${errorText(e)}`);

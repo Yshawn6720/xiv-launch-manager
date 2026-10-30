@@ -27,8 +27,8 @@ pub use dll_version::file_version;
 pub use install::{CancelToken, DownloadCancel, Progress, Staging, download_to_file, download_to_file_exact, fetch_bytes, http_client, ProgressFn, parse_json, safe_relative_path};
 pub use profile::{
     GameProcess, account_processes, discard_profile_dir, duplicate_profile_data, ensure_profile_paths, is_alive,
-    mark_account_running, mark_running, profile_data_dir, profile_in_use, profile_log_dir, running_account_pids,
-    running_accounts, unmark_account_running, unmark_running, wait_for_exit,
+    mark_account_running, mark_running, profile_data_dir, profile_in_use, profile_log_dir, profiles_in_use,
+    running_account_pids, running_accounts, unmark_account_running, unmark_running, wait_for_exit,
 };
 #[cfg(test)]
 pub use profile::process_identity;

@@ -12,7 +12,7 @@ import {
   type Region,
   type YanmucorpVersion,
 } from "./api";
-import { accountLabel, config, detected, errorText, h, openFolder, option, REGIONS, run, say } from "./app";
+import { accountLabel, config, detected, errorText, h, openFolder, option, REGIONS, run, runsActive, say } from "./app";
 import { extPanels } from "./extensions";
 import { draft, loginField } from "./login";
 import { render } from "./main";
@@ -399,6 +399,35 @@ async function editDetected(c: DalamudChoice): Promise<void> {
   }
 }
 
+/** 設定檔卡片標題列的「使用中」標記（標題列的最後一個子元素）。 */
+function inUseBadge(): HTMLElement {
+  return h("span", { class: "badge running" }, "使用中");
+}
+
+function copyTitle(inUse: boolean): string {
+  return inUse ? "遊戲執行中，請先關閉遊戲再複製" : "複製設定與插件；插件資料與快取不複製，插件首次執行時會重建";
+}
+
+/**
+ * 依 config.profilesInUse 就地更新設定檔卡片的「使用中」標記與「複製」按鈕，不重繪分頁。run() 期間不動按鈕：
+ * 它鎖住按鈕、結束時還原並重繪，這時改 disabled 會提早解鎖或被它的還原蓋掉。
+ */
+export function paintProfilesInUse(): void {
+  for (const p of config.profiles) {
+    const inUse = config.profilesInUse.includes(p.id);
+    const head = document.getElementById(`profile-head-${p.id}`);
+    const badge = head?.querySelector(":scope > .badge.running");
+    if (head && inUse && !badge) head.append(inUseBadge());
+    else if (badge && !inUse) badge.remove();
+    if (runsActive > 0) continue;
+    const copy = document.getElementById(`profile-copy-${p.id}`);
+    if (copy instanceof HTMLButtonElement) {
+      copy.disabled = inUse;
+      copy.title = copyTitle(inUse);
+    }
+  }
+}
+
 /**
  * 總覽卡片：名稱；來源・插件數；套用的帳號（沒有就不顯示）。
  * 偵測到、還沒有設定檔的舊資料外觀與操作相同：重新命名、編輯時由後端取得（必要時新增）對應的設定檔。
@@ -411,7 +440,7 @@ function choiceCard(c: DalamudChoice): HTMLElement {
   const version = p ? channelVersion(p.channel) : null;
   if (version?.kind === "pinned") meta.push(h("span", {}, `固定 ${twTagLabel(version.tag)}`));
   const title = h("span", { class: "title" }, c.name);
-  const head = h("div", { class: "card-head" }, title);
+  const head = h("div", { id: `profile-head-${key}`, class: "card-head" }, title);
   const main = h("div", { class: "card-main" }, head, h("div", { class: "meta" }, ...meta));
   const card = h("div", { class: "card" }, main);
   const rename = h("button", { id: `profile-rename-${key}`, class: "ghost", type: "button" }, "重新命名");
@@ -431,7 +460,7 @@ function choiceCard(c: DalamudChoice): HTMLElement {
       },
     }),
   );
-  head.append(rename, ...(p && config.profilesInUse.includes(p.id) ? [h("span", { class: "badge running" }, "使用中")] : []));
+  head.append(rename, ...(p && config.profilesInUse.includes(p.id) ? [inUseBadge()] : []));
   const bound = p ? config.accounts.filter((a) => a.profileId === p.id) : [];
   if (bound.length) {
     main.append(
@@ -451,12 +480,7 @@ function choiceCard(c: DalamudChoice): HTMLElement {
     // 雙開同服帳號要靠複本，放在卡片上而非「更多」裡。遊戲執行中衛月會持續寫入設定，後端也會拒絕。
     const copy = h(
       "button",
-      {
-        id: `profile-copy-${p.id}`,
-        class: "secondary",
-        type: "button",
-        title: running ? "遊戲執行中，請先關閉遊戲再複製" : "複製設定與插件；插件資料與快取不複製，插件首次執行時會重建",
-      },
+      { id: `profile-copy-${p.id}`, class: "secondary", type: "button", title: copyTitle(running) },
       "複製",
     );
     copy.disabled = running;

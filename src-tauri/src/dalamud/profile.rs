@@ -461,6 +461,15 @@ pub fn profile_in_use(paths: &AppPaths, profile_id: &str) -> AppResult<bool> {
         .is_some_and(|users| users.iter().any(is_alive)))
 }
 
+/// 正被至少一個仍在執行的遊戲使用的 profile id（依 id 排序）；已結束的只略過不寫回（讀取端不持有 launch mutex）。
+pub fn profiles_in_use(paths: &AppPaths) -> AppResult<Vec<String>> {
+    Ok(read_profile_records(&paths.profiles_running_file())?
+        .into_iter()
+        .filter(|(_, users)| users.iter().any(is_alive))
+        .map(|(id, _)| id)
+        .collect())
+}
+
 /// 注入成功後記錄 profile 佔用；同一 profile 已有別的遊戲在用時並列記錄（共用）。
 pub fn mark_running(paths: &AppPaths, profile_id: &str, process: &GameProcess) -> AppResult<()> {
     let _records = RECORDS.lock().unwrap_or_else(PoisonError::into_inner);
@@ -627,6 +636,7 @@ mod tests {
         assert!(!profile_in_use(&paths, "never-ran").expect("read"));
         assert!(profile_in_use(&paths, "alive").expect("read"));
         assert!(profile_in_use(&paths, "shared").expect("read"));
+        assert_eq!(profiles_in_use(&paths).expect("read"), ["alive", "shared"]);
 
         mark_running(&paths, "new", &me).expect("write");
         let after = read_profile_records(&paths.profiles_running_file()).expect("read");

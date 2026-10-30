@@ -19,6 +19,7 @@
     "allow-get-global-news",
     "allow-open-news",
     "allow-open-shop",
+    "allow-open-pack-demo",
     "allow-save-account",
     "allow-set-account-profile",
     "allow-import-detected-profile",

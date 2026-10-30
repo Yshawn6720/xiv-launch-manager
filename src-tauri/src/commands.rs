@@ -90,12 +90,13 @@ pub async fn get_config(state: State<'_, AppState>) -> AppResult<ConfigView> {
             account,
         });
     }
-    let mut profiles_in_use = Vec::new();
-    for profile in &config.profiles {
-        if dalamud::profile_in_use(&state.paths, &profile.id)? {
-            profiles_in_use.push(profile.id.clone());
-        }
-    }
+    let in_use = dalamud::profiles_in_use(&state.paths)?;
+    let profiles_in_use = config
+        .profiles
+        .iter()
+        .filter(|p| in_use.contains(&p.id))
+        .map(|p| p.id.clone())
+        .collect();
     let installed = dalamud::list_installed(&state.paths)?;
     let profile_info = config
         .profiles
@@ -323,6 +324,12 @@ pub fn open_news(region: Region, url: String) -> AppResult<()> {
 #[tauri::command]
 pub fn open_shop(region: Region) -> AppResult<()> {
     crate::news::open_shop(region)
+}
+
+/// 以系統預設瀏覽器開啟 README 的國際服外部包示範影片段；網址是後端常數。同步 command 的理由同 [`open_news`]。
+#[tauri::command]
+pub fn open_pack_demo() -> AppResult<()> {
+    crate::news::open_pack_demo()
 }
 
 /// 不 derive `Debug`：`password`／`otp_secret` 是 secret，不得出現在任何 Debug／log 輸出。
@@ -1058,12 +1065,13 @@ pub struct ActStatusByRegion {
     pub tw: ActStatus,
 }
 
-/// 頂端狀態列：各區服 ACT 的狀態與仍在執行的遊戲。
+/// 頂端狀態列：各區服 ACT 的狀態、仍在執行的遊戲，以及正被它們使用的 Dalamud 設定檔（Dalamud 分頁的「使用中」）。
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunningStatus {
     pub act: ActStatusByRegion,
     pub games: Vec<RunningGame>,
+    pub profiles_in_use: Vec<String>,
 }
 
 /// 前端定時輪詢的輕量查詢。不經 launch_lock：只讀，與登入、更新、下載互不影響。
@@ -1084,6 +1092,7 @@ pub async fn get_running_status(state: State<'_, AppState>) -> AppResult<Running
     Ok(RunningStatus {
         act: ActStatusByRegion { global, tw },
         games,
+        profiles_in_use: dalamud::profiles_in_use(&state.paths)?,
     })
 }
 
