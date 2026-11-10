@@ -7,7 +7,7 @@
 //!    的輸出路徑沒有 junction／symlink。期間不寫任何檔案：失敗＝遊戲目錄未被寫過。
 //! 2. [`ScannedPatch::apply`]：從檔頭再讀一次並逐 chunk 套用，每次寫入前再檢查 junction／
 //!    symlink；遊戲檔以不共用方式開啟並持有到最後 `sync_all`。失敗＝遊戲目錄可能已被寫入（只有本
-//!    patch 尚未改動遊戲目錄時的共用違規例外，見該函式）。
+//!    patch 尚未改動遊戲目錄時的共用違規與拒絕存取例外，見該函式）。
 //!
 //! 錯誤只帶規則與偏移，不回顯 patch 內容（路徑、資料）。
 
@@ -82,9 +82,9 @@ impl<R: Read + Seek> ScannedPatch<'_, R> {
     ///
     /// 遊戲檔以不共用（share mode 0）開啟，寫入與 `sync_all` 用同一個 handle，持有到落盤完成：套用期間
     /// 其他程序（含遊戲）開不了、刪不掉、改不了名已寫過的檔。失敗分類（protocols §5.4.1）：
-    /// 本 patch 尚未改動遊戲目錄時遇共用違規＝[`ApplyFailure::BeforeWrite`]
-    /// （[`AppError::GameRunning`]）；其他失敗一律 [`ApplyFailure::AfterWrite`]——遊戲目錄可能已被寫入，
-    /// 呼叫端停止、不寫該 patch 的 `.ver`、保留 dirty 標記。
+    /// 本 patch 尚未改動遊戲目錄時遇共用違規＝[`ApplyFailure::BeforeWrite`]（[`AppError::GameRunning`]）、遇拒絕
+    /// 存取＝[`ApplyFailure::BeforeWrite`]（[`AppError::GameFileDenied`]）；其他失敗一律
+    /// [`ApplyFailure::AfterWrite`]——遊戲目錄可能已被寫入，呼叫端停止、不寫該 patch 的 `.ver`、保留 dirty 標記。
     pub fn apply(self, progress: &mut dyn FnMut(u64)) -> Result<(), ApplyFailure> {
         let mut writer = Writer {
             root: self.root,
@@ -236,6 +236,8 @@ enum Fail {
         context: &'static str,
         source: io::Error,
     },
+    /// 掃描時檢查遊戲目標路徑被拒絕存取（[`game_path_check`]）。讀 patch 檔失敗不算。
+    GameDenied,
 }
 
 impl Fail {
@@ -253,6 +255,11 @@ impl Fail {
             if source.raw_os_error() == Some(ERROR_SHARING_VIOLATION.0 as i32))
     }
 
+    /// 檔案或資料夾拒絕這次存取（唯讀、權限另設）。
+    fn is_permission_denied(&self) -> bool {
+        matches!(self, Fail::Io { source, .. } if source.kind() == io::ErrorKind::PermissionDenied)
+    }
+
     /// 補上 chunk 偏移（已有偏移或 I/O 錯誤則不變）。
     fn at(self, offset: u64) -> Self {
         match self {
@@ -265,9 +272,14 @@ impl Fail {
     }
 }
 
+/// 路徑經過連結（[`Rule::Link`]）轉成專屬的 [`AppError::GamePathLinked`]（helper 據此回 exit 13）、掃描時遊戲路徑被
+/// 拒絕存取轉成 [`AppError::GameFileDenied`]（exit 14）；其他違規是 [`AppError::PatchRejected`]。
 impl From<Fail> for AppError {
     fn from(fail: Fail) -> Self {
         match fail {
+            Fail::Reject {
+                rule: Rule::Link, ..
+            } => AppError::GamePathLinked,
             Fail::Reject {
                 offset: Some(offset),
                 rule,
@@ -278,6 +290,7 @@ impl From<Fail> for AppError {
                 reason: rule.to_string(),
             },
             Fail::Io { context, source } => AppError::io(context, source),
+            Fail::GameDenied => AppError::GameFileDenied,
         }
     }
 }
@@ -285,7 +298,7 @@ impl From<Fail> for AppError {
 /// 第一階段：只讀。F/A 的資料區塊實際解碼一次（丟棄輸出）以驗 Deflate 與長度；每個輸出
 /// 路徑檢查一次 junction／symlink。
 fn scan<R: Read + Seek>(reader: &mut R, root: &Path) -> Result<u64, Fail> {
-    target::ensure_root(root)?;
+    target::ensure_root(root).map_err(game_path_check)?;
     let mut checked: HashSet<PathBuf> = HashSet::new();
     walk(reader, |_, op| {
         if let Op::AddFile { blocks, .. } = &op {
@@ -296,11 +309,17 @@ fn scan<R: Read + Seek>(reader: &mut R, root: &Path) -> Result<u64, Fail> {
         if let Some(rel) = op.target()
             && !checked.contains(rel)
         {
-            target::ensure_no_link(root, rel)?;
+            target::ensure_no_link(root, rel).map_err(game_path_check)?;
             checked.insert(rel.to_path_buf());
         }
         Ok(())
     })
+}
+
+/// 掃描時遊戲目標路徑的檢查（[`target::ensure_root`]／[`target::ensure_no_link`]）被拒絕存取：遊戲目錄還沒被寫過，
+/// 原因同第一筆寫入被拒（[`Fail::GameDenied`]），不落到其他寫入前中止。
+fn game_path_check(fail: Fail) -> Fail {
+    if fail.is_permission_denied() { Fail::GameDenied } else { fail }
 }
 
 fn discard(_: &[u8]) -> Result<(), Fail> {
@@ -414,10 +433,13 @@ impl Writer {
         Ok(())
     }
 
-    /// 本 patch 尚未改動遊戲目錄時遇共用違規＝寫入前中止，視同遊戲執行中；其他一律已寫入。
+    /// 本 patch 尚未改動遊戲目錄時：遇共用違規＝寫入前中止，視同遊戲執行中；被拒絕存取＝寫入前中止
+    /// （[`AppError::GameFileDenied`]）。其他一律已寫入。
     fn classify(&self, fail: Fail) -> ApplyFailure {
         if !self.touched && fail.is_sharing_violation() {
             ApplyFailure::BeforeWrite(AppError::GameRunning)
+        } else if !self.touched && fail.is_permission_denied() {
+            ApplyFailure::BeforeWrite(AppError::GameFileDenied)
         } else {
             ApplyFailure::AfterWrite(fail.into())
         }

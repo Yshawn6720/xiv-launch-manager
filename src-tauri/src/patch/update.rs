@@ -391,8 +391,8 @@ enum ApplyRoute {
 /// 能修改安裝根目錄或 `game\`（`may_modify`，[`access::may_modify`]）就不提權：一般權限程序本來就能改那個
 /// 安裝，交給 helper 只會讓「檢查 junction 到實際寫入」之間被換掉的子目錄把系統管理員權限的寫入導到別處。
 /// 以系統管理員身分執行時，目前 token 對受保護與一般權限可修改的安裝都能修改、分不出兩者，所以一律交給
-/// helper，由 helper 以未提權的身分判定，一般權限可修改就拒絕寫入（exit 12）。判定失敗回錯誤（尚未下載、
-/// 未寫任何東西）。
+/// helper，由 helper 決定寫入身分（一般權限可修改時改用不超過一般身分的權限寫入，見 `patch::helper`）。判定
+/// 失敗回錯誤（尚未下載、未寫任何東西）。
 fn apply_route(
     region: Region,
     elevated: impl FnOnce() -> AppResult<bool>,
@@ -434,7 +434,14 @@ async fn apply_in_process(
                 total: p.total,
             }));
         };
-        apply::apply_patches(region, &install, &patches, &mut report, &|| token.check().is_err())
+        apply::apply_patches(
+            region,
+            &install,
+            &patches,
+            &mut report,
+            &|| token.check().is_err(),
+            &running::install_in_use,
+        )
     });
     // 發送端隨 blocking 工作結束而 drop，迴圈在最後一筆進度送出後結束。
     while rx.changed().await.is_ok() {
@@ -447,7 +454,7 @@ async fn apply_in_process(
         Ok(Ok(())) => Applied::Done,
         Ok(Err(ApplyFailure::BeforeWrite(error))) => Applied::Clean(error),
         Ok(Err(ApplyFailure::AfterWrite(error))) => Applied::Broken {
-            error: broken(region, error.to_string()),
+            error: broken(region, after_write_reason(&error)),
             helper_unknown: false,
         },
         Err(_) => Applied::Broken {
@@ -525,17 +532,18 @@ async fn apply_elevated(
     applied
 }
 
-/// helper exit code 的分類（T5 契約：0 成功、10 寫入前中止、11 互斥被佔、12 安裝一般權限可修改、20 寫入後
-/// 失敗；UAC 被拒與沒能啟動時 helper 沒有執行，遊戲目錄未被寫過）。
+/// helper exit code 的分類（T5 契約：0 成功、10 寫入前中止、11 互斥被佔、12 無法改用一般身分寫入、13 遊戲
+/// 資料夾的路徑經過連結、14 遊戲檔被拒絕存取、20 寫入後失敗；UAC 被拒與沒能啟動時 helper 沒有執行，遊戲目錄
+/// 未被寫過）。12、13、14 各只有一種原因，訊息只講那一種與玩家該做什麼。
 fn classify_helper_exit(helper_exit: HelperExit) -> Applied {
     match helper_exit {
         HelperExit::Success => Applied::Done,
         HelperExit::AbortedBeforeWrite => Applied::Clean(AppError::UpdateAborted {
             reason: "更新程式在寫入前中止：patch 核對不符、安裝路徑不符或偵測到遊戲執行".into(),
         }),
-        HelperExit::InstallModifiable => Applied::Clean(AppError::UpdateAborted {
-            reason: "安裝資料夾不需系統管理員權限就能修改，更新程式拒絕以系統管理員權限寫入（以系統管理員身分執行本程式時會這樣，請以一般身分執行；關閉 UAC 的系統管理員帳號請改用官方啟動器更新）".into(),
-        }),
+        HelperExit::InstallModifiable => Applied::Clean(AppError::RunAsStandardUser),
+        HelperExit::PathLinked => Applied::Clean(AppError::GamePathLinked),
+        HelperExit::FileDenied => Applied::Clean(AppError::GameFileDenied),
         HelperExit::UacDeclined => Applied::Clean(AppError::UpdateAborted {
             reason: "未同意系統管理員權限".into(),
         }),
@@ -560,6 +568,15 @@ fn classify_helper_exit(helper_exit: HelperExit) -> Applied {
 
 fn broken(region: Region, reason: String) -> AppError {
     AppError::UpdateBroken { region, reason }
+}
+
+/// 寫入後失敗（[`AppError::UpdateBroken`]）的原因。路徑經過連結時只留原因：[`AppError::GamePathLinked`] 的全文
+/// 是寫入前停止的說法與動作，和「遊戲檔可能不完整、請修復」互相矛盾。
+fn after_write_reason(error: &AppError) -> String {
+    match error {
+        AppError::GamePathLinked => "遊戲資料夾的路徑經過連結，或與實際位置不同".into(),
+        other => other.to_string(),
+    }
 }
 
 /// 建立 job 目錄與進度檔（[`job::progress_path`] 的空檔：helper 只覆寫長度為 0 的既有檔，啟動前不寫
@@ -1929,19 +1946,27 @@ mod tests {
     }
 
     /// 主程式只以 helper 的 exit code 判定成敗。驗收「UAC 拒絕：不留 dirty 標記、
-    /// 不提示修復」的判定部分：helper 確定沒寫過遊戲目錄（寫入前中止、安裝一般權限可修改、UAC 拒絕、沒能
-    /// 啟動）才清除標記，其他（互斥被佔、寫入後失敗、其他 exit code 含被結束與崩潰）保留並提示官方修復。
+    /// 不提示修復」的判定部分：helper 確定沒寫過遊戲目錄（寫入前中止、無法改用一般身分、路徑經過連結、遊戲檔被拒絕
+    /// 存取、UAC 拒絕、沒能啟動）才清除標記，其他（互斥被佔、寫入後失敗、其他 exit code 含被結束與崩潰）保留並提示
+    /// 官方修復。
     #[test]
     fn helper_exit_classification_matches_dirty_policy() {
         assert!(matches!(classify_helper_exit(HelperExit::Success), Applied::Done));
         for exit in [
             HelperExit::AbortedBeforeWrite,
             HelperExit::InstallModifiable,
+            HelperExit::PathLinked,
+            HelperExit::FileDenied,
             HelperExit::UacDeclined,
             HelperExit::NotStarted,
         ] {
             match classify_helper_exit(exit) {
-                Applied::Clean(error @ AppError::UpdateAborted { .. }) => {
+                Applied::Clean(
+                    error @ (AppError::UpdateAborted { .. }
+                    | AppError::RunAsStandardUser
+                    | AppError::GamePathLinked
+                    | AppError::GameFileDenied),
+                ) => {
                     assert!(!error.to_string().contains("修復"), "{exit:?}: {error}");
                 }
                 _ => panic!("{exit:?} 應清除標記"),

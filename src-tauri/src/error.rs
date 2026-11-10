@@ -44,6 +44,17 @@ pub enum AppError {
     /// ZiPatch 內容或輸出路徑違反 protocols §5.4；原因只含規則與偏移，不回顯 patch 內容或路徑。
     #[error("patch 檔不符規格或輸出路徑不安全（{reason}）")]
     PatchRejected { reason: String },
+    /// 遊戲資料夾的路徑（`game\` 以下要寫的路徑，或沒有一般身分可降時的 `game\` 與它的上層）經過 junction／symlink，
+    /// 或 `game\` 的實際位置與路徑寫法不同（protocols §5.4.5）：更新在寫入前停止。
+    #[error("遊戲資料夾的路徑經過連結，或與實際位置不同（例如 junction、符號連結或替代磁碟代號），為了不讓寫入被導到別處，更新已停止；請改用官方啟動器更新")]
+    GamePathLinked,
+    /// 本 patch 第一次改動遊戲目錄之前，要寫或刪的遊戲檔、資料夾，或要檢查的遊戲路徑被拒絕存取（唯讀或權限另設）：
+    /// 更新在寫入前停止。
+    #[error("遊戲資料夾裡有檔案或資料夾無法存取或寫入（唯讀或權限另設），更新已停止；請改用官方啟動器更新")]
+    GameFileDenied,
+    /// 本程式以系統管理員身分執行、安裝一般權限就能修改，helper 卻建不出不超過一般身分的寫入身分：更新在寫入前停止。
+    #[error("無法改用一般身分寫入遊戲資料夾，更新已停止；請關閉本程式，直接開啟（不要選「以系統管理員身分執行」）後再更新")]
+    RunAsStandardUser,
     /// 版本檢查取得了 patch list（已存成 pending）：不啟動。前端以訊息結尾「，請先執行遊戲更新」辨識
     /// （`src/api.ts` `UPDATE_REQUIRED_SUFFIX`），接著自動開始遊戲更新；改訊息須同步改前端。
     #[error("{region} 遊戲需要更新（{patch_count} 個 patch，共 {} MB），請先執行遊戲更新", mib(.total_bytes))]

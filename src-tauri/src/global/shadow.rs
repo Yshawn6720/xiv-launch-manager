@@ -493,6 +493,9 @@ pub fn rebuild(root: &Path, install: &Path, pack: &Pack) -> AppResult<()> {
                 .to_string()
         }
         HelperExit::FailedAfterWrite => "建立到一半失敗".to_string(),
+        // 13、14 只有套用 patch 的 helper 會回；影子 helper 回這兩個值屬異常結束。
+        HelperExit::PathLinked => "建立程式異常結束（13）".to_string(),
+        HelperExit::FileDenied => "建立程式異常結束（14）".to_string(),
         HelperExit::Other(code) => format!("建立程式異常結束（{code}）"),
     };
     Err(shadow_error(reason))

@@ -8,11 +8,13 @@
 //!
 //! exit code：0＝成功、10＝寫入前中止（job 或進度檔無效、安裝路徑不符、遊戲執行中、無法判定安裝資料夾的
 //! 權限、核對或掃描失敗、之前的 patch 已完整套用而下一個在寫入前失敗；影子：動到影子之前中止）、11＝另一個
-//! 套用佔著同一安裝的 named mutex、12＝安裝資料夾（影子：影子上層資料夾）一般權限就能修改（拒絕以系統管理員
-//! 權限寫入）、20＝已寫入後失敗、2＝參數不符。
+//! 套用佔著同一安裝的 named mutex、12＝安裝資料夾一般權限就能修改、卻無法改用不超過一般身分的權限寫入（影子：
+//! 影子上層資料夾一般權限就能修改，拒絕以系統管理員權限建立）、13＝寫入前發現遊戲資料夾的路徑經過連結或與實際
+//! 位置不同、14＝第一筆寫入前遊戲資料夾或遊戲檔被拒絕存取（持有 `game\`、掃描或第一筆寫入時；13、14 只有套用 patch
+//! 會回）、20＝已寫入後失敗、2＝參數不符。
 
 use std::ffi::{OsStr, OsString};
-use std::fs::{File, OpenOptions};
+use std::fs::{File, Metadata, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::iter;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
@@ -39,9 +41,9 @@ use windows::core::{HRESULT, PCWSTR, w};
 use crate::error::{AppError, AppResult};
 use crate::game;
 use crate::global::shadow;
-use crate::patch::access::{self, AccessToken};
+use crate::patch::access::{self, AccessToken, Impersonation};
 use crate::patch::apply::{ApplyFailure, ApplyProgress, apply_patches};
-use crate::patch::job::{self, Job, is_plain_absolute, is_sha256_hex, read_job, sha256_hex};
+use crate::patch::job::{self, Job, JobPatch, is_plain_absolute, is_sha256_hex, read_job, sha256_hex};
 use crate::patch::running::{Win32Handle, comparable, exe_running, install_in_use, normalize_path, win_error};
 use crate::region::Region;
 
@@ -52,6 +54,8 @@ const EXIT_BAD_ARGS: i32 = 2;
 const EXIT_ABORTED_BEFORE_WRITE: i32 = 10;
 const EXIT_BUSY: i32 = 11;
 const EXIT_INSTALL_MODIFIABLE: i32 = 12;
+const EXIT_PATH_LINKED: i32 = 13;
+const EXIT_FILE_DENIED: i32 = 14;
 const EXIT_FAILED_AFTER_WRITE: i32 = 20;
 const MUTEX_PREFIX: &str = r"Local\xiv-launch-manager-patch-";
 
@@ -65,9 +69,15 @@ pub enum HelperExit {
     AbortedBeforeWrite,
     /// 11：另一個套用正持有同一安裝的 named mutex（可能正在寫），保留 dirty 標記。
     Busy,
-    /// 12：啟動 helper 的一般權限身分就能修改安裝根目錄或 `game\`，helper 沒有寫入任何遊戲檔就結束
-    /// （[`access::may_modify`]）。可清除 dirty 標記。
+    /// 12：啟動 helper 的一般權限身分就能修改安裝根目錄或 `game\`（[`access::may_modify`]），但無法從它縮減出
+    /// 寫入的身分（[`access::Impersonation`]），helper 沒有寫入任何遊戲檔就結束。可清除 dirty 標記。
     InstallModifiable,
+    /// 13：寫入前發現遊戲資料夾的路徑經過連結，或 `game\` 的實際位置與路徑寫法不同。失敗的 patch 未寫入任何遊戲檔，
+    /// 之前的都已完整套用（持有 `game\` 時發現則一個都還沒寫）。可清除 dirty 標記。
+    PathLinked,
+    /// 14：第一筆寫入前，`game\`、要檢查的遊戲路徑或要寫、刪的遊戲檔被拒絕存取。失敗的 patch 未寫入任何遊戲檔，
+    /// 之前的都已完整套用。可清除 dirty 標記。
+    FileDenied,
     /// 20：已開始寫入遊戲目錄後失敗，保留 dirty 標記。
     FailedAfterWrite,
     /// 使用者在 UAC 拒絕，helper 沒有啟動。
@@ -86,6 +96,8 @@ impl HelperExit {
             EXIT_ABORTED_BEFORE_WRITE => Self::AbortedBeforeWrite,
             EXIT_BUSY => Self::Busy,
             EXIT_INSTALL_MODIFIABLE => Self::InstallModifiable,
+            EXIT_PATH_LINKED => Self::PathLinked,
+            EXIT_FILE_DENIED => Self::FileDenied,
             EXIT_FAILED_AFTER_WRITE => Self::FailedAfterWrite,
             other => Self::Other(other),
         }
@@ -257,9 +269,7 @@ fn wide_nul(s: &OsStr) -> Vec<u16> {
 }
 
 /// helper 本體。任何錯誤都只轉成 exit code，不輸出內容。寫入目標一律用 HKLM 解析出的安裝根目錄，
-/// job 的 `expected_install` 只用來交叉核對。安裝資料夾一般權限就能修改時拒絕寫入：那種安裝裡一般權限程序
-/// 可以在 junction 檢查與實際寫入之間換掉子目錄，把系統管理員權限的寫入導到別處（parent 以一般身分執行時遇到
-/// 可修改的安裝本來就在程序內套用；以系統管理員身分執行時一律啟動 helper，由這裡判定）。
+/// job 的 `expected_install` 只用來交叉核對。寫入身分見 [`write_install`]。
 fn run_helper(job_path: &Path, sha256: &str) -> i32 {
     let Ok((job, mut progress)) = open_job(job_path, sha256) else {
         return EXIT_ABORTED_BEFORE_WRITE;
@@ -276,16 +286,53 @@ fn run_helper(job_path: &Path, sha256: &str) -> i32 {
     if !matches!(normalize_path(&install), Ok(actual) if actual == expected) {
         return EXIT_ABORTED_BEFORE_WRITE;
     }
-    match AccessToken::unelevated().and_then(|token| access::may_modify(&token, &install)) {
-        Ok(false) => {}
-        Ok(true) => return EXIT_INSTALL_MODIFIABLE,
-        Err(_) => return EXIT_ABORTED_BEFORE_WRITE,
-    }
-    if !matches!(install_in_use(&install), Ok(false)) {
+    let Ok(linked) = AccessToken::linked() else {
+        return EXIT_ABORTED_BEFORE_WRITE;
+    };
+    write_install(&install, &job.patches, &mut |p| progress.write(p), linked)
+}
+
+/// helper 寫入段（HKLM 交叉核對、安裝 mutex 之後）：決定寫入身分並套用，回傳 exit code。`linked` 是啟動 helper
+/// 的一般權限身分（[`AccessToken::linked`]）：
+/// - 有、且它能修改安裝（以系統管理員身分執行本程式、安裝一般權限可改）：目前執行緒改用不超過它的身分寫入
+///   （[`access::Impersonation`]），寫入沒有權限可借；建不出這個身分＝12。
+/// - 有、但它不能修改（受保護的安裝）：以 helper 自己的權限寫入，一般權限程序換不掉路徑。
+/// - 沒有（UAC 關閉、未啟用 Admin Approval Mode 的內建 Administrator）：以 helper 自己的權限寫入，先持有 `game\`
+///   （[`hold_game_dir`]）；`game\` 以下由 ZiPatch 掃描與每筆寫入前的連結檢查擋。
+///
+/// 遊戲執行判定只列舉程序，在沒有模擬的執行緒做（[`access::unimpersonated`]）。持有 `game\` 或掃描時路徑經過連結
+/// ＝13、持有、掃描或第一筆寫入前被拒絕存取＝14、其他寫入前失敗＝10、寫入後失敗＝20。
+fn write_install(
+    install: &Path,
+    patches: &[JobPatch],
+    progress: &mut dyn FnMut(ApplyProgress),
+    linked: Option<AccessToken>,
+) -> i32 {
+    // 持有到函式結束（套用完成）：縮減的身分在 Drop 時還原，`game\` 的 handle 在 Drop 時關閉。
+    let (_reduced, _held): (Option<Impersonation>, Option<File>) = match linked {
+        Some(linked) => match access::may_modify(&linked, install) {
+            Ok(false) => (None, None),
+            Ok(true) => match Impersonation::begin(&linked) {
+                Ok(reduced) => (Some(reduced), None),
+                Err(_) => return EXIT_INSTALL_MODIFIABLE,
+            },
+            Err(_) => return EXIT_ABORTED_BEFORE_WRITE,
+        },
+        None => match hold_game_dir(&install.join("game")) {
+            Ok(game) => (None, Some(game)),
+            Err(HoldFailure::Linked) => return EXIT_PATH_LINKED,
+            Err(HoldFailure::Denied) => return EXIT_FILE_DENIED,
+            Err(HoldFailure::Failed) => return EXIT_ABORTED_BEFORE_WRITE,
+        },
+    };
+    let in_use = |install: &Path| access::unimpersonated(|| install_in_use(install));
+    if !matches!(in_use(install), Ok(false)) {
         return EXIT_ABORTED_BEFORE_WRITE;
     }
-    match apply_patches(Region::Global, &install, &job.patches, &mut |p| progress.write(p), &|| false) {
+    match apply_patches(Region::Global, install, patches, progress, &|| false, &in_use) {
         Ok(()) => EXIT_SUCCESS,
+        Err(ApplyFailure::BeforeWrite(AppError::GamePathLinked)) => EXIT_PATH_LINKED,
+        Err(ApplyFailure::BeforeWrite(AppError::GameFileDenied)) => EXIT_FILE_DENIED,
         Err(ApplyFailure::BeforeWrite(_)) => EXIT_ABORTED_BEFORE_WRITE,
         Err(ApplyFailure::AfterWrite(_)) => EXIT_FAILED_AFTER_WRITE,
     }
@@ -385,28 +432,71 @@ fn open_job_dir(dir: &Path) -> AppResult<File> {
     Ok(file)
 }
 
-/// 開啟影子上層資料夾，共用模式不含刪除：持有期間它與它的每一層上層都不能被改名或刪除（NTFS 拒絕改名
-/// 底下有開啟中項目的資料夾），之後以字面路徑做的檢查與建立都落在這個資料夾。要求列出內容的權限：只要求
-/// 讀屬性的 handle 不參與共用模式檢查，擋不住改名。它本身是連結、不是目錄，或最終路徑和字面路徑不同
-/// （某一層上層是 junction／symlink，連結的目標可以被改掉）都回錯。
-fn hold_shadow_parent(parent: &Path) -> AppResult<File> {
+/// 開啟並持有資料夾（不跟隨最後一層 reparse point），共用模式不含刪除：持有期間它與它的每一層上層都不能被改名
+/// 或刪除（NTFS 拒絕改名底下有開啟中項目的資料夾），之後以字面路徑做的檢查與寫入都落在這個資料夾。要求列出
+/// 內容的權限：只要求讀屬性的 handle 不參與共用模式檢查，擋不住改名。回傳 handle 與它本身的 metadata；是不是
+/// 連結、最終路徑是否相同由呼叫端判定（[`same_final_path`]），兩個呼叫端的連結判定不同。
+fn hold_dir(dir: &Path) -> std::io::Result<(File, Metadata)> {
     let file = OpenOptions::new()
         .access_mode(FILE_LIST_DIRECTORY.0 | FILE_READ_ATTRIBUTES.0)
         .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0 | FILE_FLAG_OPEN_REPARSE_POINT.0)
-        .open(parent)
-        .map_err(|e| AppError::io("開啟影子資料夾的上層", e))?;
-    let attributes = file
-        .metadata()
-        .map_err(|e| AppError::io("讀取影子資料夾的上層", e))?
-        .file_attributes();
+        .open(dir)?;
+    let metadata = file.metadata()?;
+    Ok((file, metadata))
+}
+
+/// `file`（以 [`hold_dir`] 開啟的 `dir`）的最終路徑是否等於字面路徑。不同＝某一層上層是 junction／symlink（連結
+/// 的目標可以被改掉），或路徑寫法與實際位置不同（例如 8.3 短名、`subst`）。
+fn same_final_path(file: &File, dir: &Path) -> AppResult<bool> {
+    Ok(comparable(&final_path(file, VOLUME_NAME_DOS)?) == comparable(dir))
+}
+
+/// 持有影子上層資料夾（[`hold_dir`]）。它本身是任何一種 reparse point（起點的判定，比 [`hold_game_dir`] 嚴）、
+/// 不是目錄，或最終路徑和字面路徑不同都回錯。
+fn hold_shadow_parent(parent: &Path) -> AppResult<File> {
+    let (file, metadata) = hold_dir(parent).map_err(|e| AppError::io("開啟影子資料夾的上層", e))?;
+    let attributes = metadata.file_attributes();
     if attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 || attributes & FILE_ATTRIBUTE_DIRECTORY.0 == 0 {
         return Err(untrusted("影子資料夾的上層是連結或不是目錄"));
     }
-    if comparable(&final_path(&file, VOLUME_NAME_DOS)?) != comparable(parent) {
+    if !same_final_path(&file, parent)? {
         return Err(untrusted("影子資料夾的上層路徑經過連結"));
     }
     Ok(file)
+}
+
+/// [`hold_game_dir`] 的失敗。
+enum HoldFailure {
+    /// `game\` 本身是連結，或最終路徑與字面路徑不同：exit 13。
+    Linked,
+    /// 開啟 `game\` 被拒絕存取：exit 14。
+    Denied,
+    /// 其他開不了、不是目錄或解析不了最終路徑：exit 10。
+    Failed,
+}
+
+/// 沒有 linked token 時持有 `{install}\game` 到套用結束（[`hold_dir`]）：`game\` 與它的每一層上層（含安裝根目錄）
+/// 不能被改名或刪除，安裝根目錄因此清不空；目錄要是空的才能設成 reparse point（MS-FSA 2.1.5.10.37），所以根目錄
+/// 與上層在持有期間不能原地變成連結。拒絕共用寫入擋不住這件事：有 `FILE_WRITE_ATTRIBUTES` 就能設定 reparse point，
+/// 而這個權限不受共用模式檢查。`game\` 本身是連結（name-surrogate reparse point；WOF 壓縮、雲端佔位檔等不轉向的
+/// reparse point 照常寫入，同 protocols §5.4.5）或最終路徑不同就拒絕。
+fn hold_game_dir(game: &Path) -> Result<File, HoldFailure> {
+    let (file, metadata) = hold_dir(game).map_err(|e| match e.kind() {
+        std::io::ErrorKind::PermissionDenied => HoldFailure::Denied,
+        _ => HoldFailure::Failed,
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Err(HoldFailure::Linked);
+    }
+    if !metadata.is_dir() {
+        return Err(HoldFailure::Failed);
+    }
+    match same_final_path(&file, game) {
+        Ok(true) => Ok(file),
+        Ok(false) => Err(HoldFailure::Linked),
+        Err(_) => Err(HoldFailure::Failed),
+    }
 }
 
 /// handle 的最終路徑（`GetFinalPathNameByHandleW`：展開 junction／symlink、長檔名與實際大小寫）。`volume`
@@ -509,9 +599,13 @@ impl Drop for InstallLock {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::patch::job::{JobPatch, write_job};
+    use crate::patch::access::test_support::{
+        create_dir_with_sddl, own_reference, reference_without_authenticated_users, restricted_reference,
+    };
+    use crate::patch::job::write_job;
     use crate::patch::list::Repo;
-    use crate::patch::update::test_support::{EX1_VERSION, OLD_VERSION, TW_EX1_PATCH, snapshot};
+    use crate::patch::running::test_support::GAME_PROCESSES;
+    use crate::patch::update::test_support::{EX1_DAT, EX1_VERSION, OLD_VERSION, TW_EX1_PATCH, snapshot};
     use crate::patch::zipatch::test_support::junction;
 
     const SHA: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -586,6 +680,8 @@ mod tests {
         assert_eq!(HelperExit::from_exit_code(10), HelperExit::AbortedBeforeWrite);
         assert_eq!(HelperExit::from_exit_code(11), HelperExit::Busy);
         assert_eq!(HelperExit::from_exit_code(12), HelperExit::InstallModifiable);
+        assert_eq!(HelperExit::from_exit_code(13), HelperExit::PathLinked);
+        assert_eq!(HelperExit::from_exit_code(14), HelperExit::FileDenied);
         assert_eq!(HelperExit::from_exit_code(20), HelperExit::FailedAfterWrite);
         assert_eq!(HelperExit::from_exit_code(2), HelperExit::Other(2));
         assert_eq!(
@@ -673,6 +769,22 @@ mod tests {
         assert!(hold_shadow_parent(&base.join(r"gp2\parent")).is_ok());
     }
 
+    /// 持有 `game\` 期間，`game\` 不能移出安裝根目錄（根目錄因此清不空，不能原地設成連結），安裝根目錄也不能改名。
+    #[test]
+    fn held_game_dir_pins_install_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let install = dir.path().join("install");
+        let game = install.join("game");
+        std::fs::create_dir_all(&game).unwrap();
+        let Ok(held) = hold_game_dir(&game) else {
+            panic!("一般資料夾應可持有");
+        };
+        assert!(std::fs::rename(&game, dir.path().join("moved")).is_err(), "game 不能移出安裝根目錄");
+        assert!(std::fs::rename(&install, dir.path().join("renamed")).is_err(), "安裝根目錄不能改名");
+        drop(held);
+        std::fs::rename(&game, dir.path().join("moved")).expect("放開後可以移動");
+    }
+
     #[test]
     fn install_lock_is_exclusive_across_threads() {
         let key = format!(r"c:\test\{}", uuid::Uuid::new_v4());
@@ -693,8 +805,8 @@ mod tests {
     //
     // HKLM 解析（`game::detect_install`）在測試中無法替換。job 與進度檔都有效時，helper 先取安裝的 named
     // mutex 才解析 HKLM；測試執行緒預先持有該 mutex，有效的 job 因此停在 11（互斥被佔），在那之前就被拒的
-    // 回 10，藉此區分「因竄改被拒」與「因 HKLM 不符被拒」。HKLM 之後的再核對與套用見 `patch::apply` 的測試；
-    // HKLM 交叉核對與提權後實際寫入只能手測。
+    // 回 10，藉此區分「因竄改被拒」與「因 HKLM 不符被拒」。HKLM 之後的寫入段見下方 `write_install` 的測試；
+    // HKLM 交叉核對與真正的 UAC 提權只能手測。
 
     /// parent 端的狀態：假國際服安裝、已下載的實際 patch、空進度檔與 `write_job` 寫出的 job。
     struct Parent {
@@ -958,5 +1070,242 @@ mod tests {
         };
         assert_eq!(run(parent.install.clone()), EXIT_BUSY);
         assert_eq!(run(parent.dir.path().join("missing")), EXIT_ABORTED_BEFORE_WRITE);
+    }
+
+    // ── 寫入段（直接呼叫 `write_install`，一般權限、不經 UAC）────────────────────
+    //
+    // `linked` 代替 helper 拿到的 linked token：`none`＝UAC 關閉等沒有分割 token 的帳號；`own`＝UAC 開啟、一般身分
+    // 就能修改安裝（測試的 tempdir 安裝即是），以縮減的身分寫入。
+
+    const EX1_VER_PATH: &str = r"game\sqpack\ex1\ex1.ver";
+
+    fn none() -> Option<AccessToken> {
+        None
+    }
+
+    fn own() -> Option<AccessToken> {
+        Some(own_reference())
+    }
+
+    fn restricted() -> Option<AccessToken> {
+        Some(restricted_reference())
+    }
+
+    impl Parent {
+        /// 在新執行緒跑寫入段（縮減的身分綁在執行緒上），寫入 `install`（安裝的字面路徑），回傳 exit code。
+        fn write(&self, install: &Path, linked: fn() -> Option<AccessToken>) -> i32 {
+            let (install, patches) = (install.to_path_buf(), self.job.patches.clone());
+            std::thread::spawn(move || write_install(&install, &patches, &mut |_| {}, linked()))
+                .join()
+                .unwrap()
+        }
+
+        fn ex1_ver(&self) -> String {
+            std::fs::read_to_string(self.install.join(EX1_VER_PATH)).unwrap()
+        }
+    }
+
+    /// 錨 2：沒有 linked token（UAC 關閉的系統管理員帳號），安裝一般權限可改時照常寫入（起點回 12）。
+    #[test]
+    fn without_linked_token_modifiable_install_is_written() {
+        let _processes = GAME_PROCESSES.blocking_read();
+        let parent = Parent::new();
+        assert_eq!(parent.write(&parent.install, none), EXIT_SUCCESS);
+        assert_eq!(parent.ex1_ver(), EX1_VERSION);
+        assert!(parent.install.join(EX1_DAT).is_file());
+    }
+
+    /// 錨 3：linked token 能修改安裝（以系統管理員身分執行本程式、安裝一般權限可改）時，以縮減的身分寫入成功
+    /// （起點回 12）。
+    #[test]
+    fn modifiable_install_is_written_as_reduced_identity() {
+        let _processes = GAME_PROCESSES.blocking_read();
+        let parent = Parent::new();
+        assert_eq!(parent.write(&parent.install, own), EXIT_SUCCESS);
+        assert_eq!(parent.ex1_ver(), EX1_VERSION);
+        assert!(parent.install.join(EX1_DAT).is_file());
+    }
+
+    /// 錨 4：linked token 能修改安裝、但無法從它縮減出身分（受限 token）時回 12，不寫入。
+    #[test]
+    fn identity_that_cannot_be_reduced_is_refused_without_writing() {
+        let _processes = GAME_PROCESSES.blocking_read();
+        let parent = Parent::new();
+        let before = snapshot(&parent.install);
+        assert_eq!(parent.write(&parent.install, restricted), EXIT_INSTALL_MODIFIABLE);
+        assert_eq!(snapshot(&parent.install), before);
+    }
+
+    /// 錨 5：兩種寫入身分下，`game\sqpack\ex1` 是 junction 時都在寫入前回 13，連結目標不變。
+    #[test]
+    fn junction_in_game_path_is_refused_for_both_identities() {
+        let _processes = GAME_PROCESSES.blocking_read();
+        for (name, linked) in [("沒有 linked token", none as fn() -> Option<AccessToken>), ("縮減的身分", own)] {
+            let parent = Parent::new();
+            let ex1 = parent.install.join(r"game\sqpack\ex1");
+            let outside = parent.dir.path().join("outside");
+            std::fs::rename(&ex1, &outside).unwrap();
+            junction(&ex1, &outside);
+            let before = snapshot(&outside);
+            assert_eq!(parent.write(&parent.install, linked), EXIT_PATH_LINKED, "{name}");
+            assert_eq!(snapshot(&outside), before, "{name}");
+        }
+    }
+
+    /// 錨 2：沒有 linked token 時，`game` 本身是 junction、或安裝路徑的上層經過 junction，都在寫入前回 13。
+    #[test]
+    fn without_linked_token_linked_game_dir_or_install_path_is_refused() {
+        let _processes = GAME_PROCESSES.blocking_read();
+        let parent = Parent::new();
+        let game = parent.install.join("game");
+        let real = parent.dir.path().join("game-real");
+        std::fs::rename(&game, &real).unwrap();
+        junction(&game, &real);
+        let before = snapshot(&real);
+        assert_eq!(parent.write(&parent.install, none), EXIT_PATH_LINKED, "game 本身是 junction");
+        assert_eq!(snapshot(&real), before);
+
+        let parent = Parent::new();
+        let via = parent.dir.path().join("via");
+        junction(&via, parent.dir.path());
+        let through = via.join(parent.install.file_name().unwrap());
+        let before = snapshot(&parent.install);
+        assert_eq!(parent.write(&through, none), EXIT_PATH_LINKED, "安裝路徑的上層經過 junction");
+        assert_eq!(snapshot(&parent.install), before);
+    }
+
+    /// 第一個要寫的遊戲檔是唯讀：還沒改動遊戲目錄就被拒絕存取，回 14、遊戲目錄不變（起點回 12；起點的程序內
+    /// 套用歸寫入後失敗）。
+    #[test]
+    fn read_only_game_file_before_first_write_is_file_denied() {
+        let _processes = GAME_PROCESSES.blocking_read();
+        let parent = Parent::new();
+        let dat = parent.install.join(EX1_DAT);
+        std::fs::write(&dat, b"").unwrap();
+        let set_readonly = |readonly: bool| {
+            let mut permissions = std::fs::metadata(&dat).unwrap().permissions();
+            permissions.set_readonly(readonly);
+            std::fs::set_permissions(&dat, permissions).unwrap();
+        };
+        set_readonly(true);
+        let before = snapshot(&parent.install);
+        let code = parent.write(&parent.install, none);
+        let after = snapshot(&parent.install);
+        set_readonly(false);
+        assert_eq!(code, EXIT_FILE_DENIED);
+        assert_eq!(after, before);
+    }
+
+    fn without_authenticated_users() -> Option<AccessToken> {
+        Some(reference_without_authenticated_users())
+    }
+
+    /// 錨 3（pre-blind-3 B1）：寫入真的在縮減的身分下進行。`sqpack\ex1` 只授權給 Authenticated Users，參考身分把它
+    /// 設成僅拒絕：安裝本身仍可改（走縮減的身分），縮減後第一筆寫入前就被拒絕存取＝14、遊戲目錄不變。沒有模擬時
+    /// 目前程序經 Authenticated Users 寫得進，會回 0。
+    #[test]
+    fn reduced_identity_is_what_writes() {
+        let _processes = GAME_PROCESSES.blocking_read();
+        let parent = Parent::new();
+        let ex1 = parent.install.join(r"game\sqpack\ex1");
+        let original = parent.dir.path().join("ex1-original");
+        std::fs::rename(&ex1, &original).unwrap();
+        create_dir_with_sddl(&ex1, "D:P(A;OICI;FA;;;AU)");
+        for entry in std::fs::read_dir(&original).unwrap() {
+            let entry = entry.unwrap();
+            std::fs::copy(entry.path(), ex1.join(entry.file_name())).unwrap();
+        }
+        let before = snapshot(&parent.install);
+        assert_eq!(parent.write(&parent.install, without_authenticated_users), EXIT_FILE_DENIED);
+        assert_eq!(snapshot(&parent.install), before);
+    }
+
+    /// 錨 2（pre-blind-3 B2）：沒有 linked token 時 `game\` 持有到套用結束。第一筆進度回呼（第一筆寫入之前，還沒有
+    /// 開著的遊戲檔）時，`game` 移不出安裝根目錄、安裝根目錄也不能改名。
+    #[test]
+    fn without_linked_token_game_dir_stays_held_while_writing() {
+        let _processes = GAME_PROCESSES.blocking_read();
+        let parent = Parent::new();
+        let (install, patches) = (parent.install.clone(), parent.job.patches.clone());
+        let (moved, renamed) = (parent.dir.path().join("moved"), parent.dir.path().join("renamed"));
+        let (code, refused) = std::thread::spawn(move || {
+            let mut refused = None;
+            let code = write_install(
+                &install,
+                &patches,
+                &mut |_| {
+                    if refused.is_none() {
+                        refused = Some((
+                            std::fs::rename(install.join("game"), &moved).is_err(),
+                            std::fs::rename(&install, &renamed).is_err(),
+                        ));
+                    }
+                },
+                None,
+            );
+            (code, refused)
+        })
+        .join()
+        .unwrap();
+        assert_eq!(refused, Some((true, true)), "game 移不出、安裝根目錄不能改名");
+        assert_eq!(code, EXIT_SUCCESS);
+    }
+
+    /// pre-fact-3 B1：沒有 linked token、開啟 `game\` 被拒絕存取時回 14（不是不指名原因的 10），不寫入。
+    #[test]
+    fn without_linked_token_denied_game_dir_is_file_denied() {
+        let _processes = GAME_PROCESSES.blocking_read();
+        let parent = Parent::new();
+        let install = parent.dir.path().join("locked-install");
+        std::fs::create_dir(&install).unwrap();
+        create_dir_with_sddl(&install.join("game"), "D:P");
+        assert_eq!(parent.write(&install, none), EXIT_FILE_DENIED);
+    }
+
+    /// pre-blind-3 B6：持有 `game\` 只拒連結；不轉向的 reparse point（這裡用沒有 filter 處理的第三方 tag）照常持有。
+    /// 影子上層保留起點的判定，任何 reparse point 都拒。
+    #[test]
+    fn non_link_reparse_point_is_held_for_game_but_refused_for_shadow_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("tagged");
+        std::fs::create_dir(&target).unwrap();
+        set_third_party_reparse_tag(&target);
+        assert!(hold_game_dir(&target).is_ok(), "非連結型 reparse point 不算連結");
+        assert!(hold_shadow_parent(&target).is_err(), "影子上層任何 reparse point 都拒");
+    }
+
+    /// 在空資料夾設一個非 Microsoft、非 name-surrogate 的 reparse tag（0x123，帶 GUID）。一般使用者對自己的資料夾
+    /// 就能設（只需寫入屬性的權限）。
+    fn set_third_party_reparse_tag(dir: &Path) {
+        const SCRIPT: &str = r#"
+Add-Type -TypeDefinition @"
+using System; using System.Runtime.InteropServices; using Microsoft.Win32.SafeHandles;
+public static class R {
+  [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+  static extern SafeFileHandle CreateFileW(string n, uint a, uint s, IntPtr sa, uint c, uint f, IntPtr t);
+  [DllImport("kernel32.dll", SetLastError=true)]
+  static extern bool DeviceIoControl(SafeFileHandle h, uint code, byte[] i, uint il, IntPtr o, uint ol, out uint r, IntPtr ov);
+  public static int Set(string path) {
+    using (var h = CreateFileW(path, 0x100, 7, IntPtr.Zero, 3, 0x02000000 | 0x00200000, IntPtr.Zero)) {
+      if (h.IsInvalid) return Marshal.GetLastWin32Error();
+      var b = new byte[28];
+      BitConverter.GetBytes(0x123u).CopyTo(b, 0);
+      BitConverter.GetBytes((ushort)4).CopyTo(b, 4);
+      Guid.NewGuid().ToByteArray().CopyTo(b, 8);
+      uint r;
+      return DeviceIoControl(h, 0x000900A4, b, (uint)b.Length, IntPtr.Zero, 0, out r, IntPtr.Zero) ? 0 : Marshal.GetLastWin32Error();
+    }
+  }
+}
+"@
+exit [R]::Set($env:XLM_REPARSE_TARGET)
+"#;
+        let status = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
+            .env("XLM_REPARSE_TARGET", dir)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .expect("執行 powershell");
+        assert!(status.success(), "設定 reparse tag 失敗：{status}");
     }
 }

@@ -16,14 +16,14 @@ use crate::error::{AppError, AppResult};
 use crate::game::MAX_EXPANSION;
 use crate::patch::job::JobPatch;
 use crate::patch::zipatch::{self, ScannedPatch};
-use crate::patch::{list, running};
+use crate::patch::list;
 use crate::region::Region;
 
 /// 套用失敗的分類，決定呼叫端是否保留 dirty 標記。
 #[derive(Debug)]
 pub enum ApplyFailure {
     /// 失敗的這個 patch 尚未改動遊戲目錄（核對不符、掃描拒絕、偵測到遊戲執行、取消，或第一筆寫入前開檔
-    /// 遇共用違規），之前的 patch 都已完整套用並寫好 `.ver`：遊戲目錄處於某個完整版本，呼叫端可清除
+    /// 遇共用違規、拒絕存取），之前的 patch 都已完整套用並寫好 `.ver`：遊戲目錄處於某個完整版本，呼叫端可清除
     /// dirty 標記。多個 patch 時不代表遊戲目錄完全未變。
     BeforeWrite(AppError),
     /// 已開始寫入遊戲目錄（套用或寫 `.ver`、`.bck` 失敗，含已寫入後的共用違規）——保留 dirty 標記。
@@ -41,15 +41,17 @@ pub struct ApplyProgress {
 }
 
 /// 依序套用 `patches` 到 `install`（安裝根目錄；套用根目錄一律 `{install}\game`）。`cancelled`
-/// 只在 patch 與 patch 之間檢查（套用中不中斷）。版本逐 patch 推進：每個 patch 套用成功後才寫它的
-/// `.ver`，失敗即停止，之後的 patch 不碰。國際服整批都成功後，每個存在的 `.ver` 原樣寫成同目錄的 `.bck`
-/// （protocols §5.1）；失敗或取消時不寫。
+/// 只在 patch 與 patch 之間檢查（套用中不中斷）。`in_use` 是每個 patch 寫入前的遊戲執行判定
+/// （[`crate::patch::running::install_in_use`]；helper 以縮減的身分寫入時改在沒有模擬的執行緒判定）。版本逐 patch 推進：每個
+/// patch 套用成功後才寫它的 `.ver`，失敗即停止，之後的 patch 不碰。國際服整批都成功後，每個存在的 `.ver` 原樣
+/// 寫成同目錄的 `.bck`（protocols §5.1）；失敗或取消時不寫。
 pub fn apply_patches(
     region: Region,
     install: &Path,
     patches: &[JobPatch],
     progress: &mut dyn FnMut(ApplyProgress),
     cancelled: &dyn Fn() -> bool,
+    in_use: &dyn Fn(&Path) -> AppResult<bool>,
 ) -> Result<(), ApplyFailure> {
     let game_root = install.join("game");
     let patch_count = patches.len();
@@ -58,8 +60,8 @@ pub fn apply_patches(
             return Err(ApplyFailure::BeforeWrite(AppError::Cancelled));
         }
         let mut file = open_patch(&patch.path).map_err(ApplyFailure::BeforeWrite)?;
-        let scanned =
-            prepare(&mut file, patch, install, &game_root).map_err(ApplyFailure::BeforeWrite)?;
+        let scanned = prepare(&mut file, patch, install, &game_root, in_use)
+            .map_err(ApplyFailure::BeforeWrite)?;
         let total = scanned.total_bytes();
         let mut report = |done| {
             progress(ApplyProgress {
@@ -103,12 +105,13 @@ fn prepare<'a>(
     patch: &JobPatch,
     install: &Path,
     game_root: &Path,
+    in_use: &dyn Fn(&Path) -> AppResult<bool>,
 ) -> AppResult<ScannedPatch<'a, File>> {
     list::verify_blocks(&mut *file, patch.length, patch.hash_block_size, &patch.hashes)?;
     file.seek(SeekFrom::Start(0))
         .map_err(|e| AppError::io("讀取 patch 檔", e))?;
     let scanned = zipatch::scan_patch(file, game_root)?;
-    if running::install_in_use(install)? {
+    if in_use(install)? {
         return Err(AppError::GameRunning);
     }
     Ok(scanned)
@@ -121,7 +124,7 @@ mod tests {
 
     use super::*;
     use crate::patch::list::Repo;
-    use crate::patch::running::test_support::{FakeProcess, GAME_PROCESSES};
+    use crate::patch::running::{self, test_support::{FakeProcess, GAME_PROCESSES}};
 
     /// 台服 ex1 2026.08.07 的實際 patch（52,848 bytes），清單中的長度、區塊大小與 SHA1。
     const TW_EX1_PATCH: &[u8] = include_bytes!("testdata/D2026.08.07.0000.0000.patch");
@@ -185,8 +188,14 @@ mod tests {
             cancelled: &dyn Fn() -> bool,
         ) -> (Result<(), ApplyFailure>, Vec<ApplyProgress>) {
             let mut seen = Vec::new();
-            let result =
-                apply_patches(region, self.install.path(), patches, &mut |p| seen.push(p), cancelled);
+            let result = apply_patches(
+                region,
+                self.install.path(),
+                patches,
+                &mut |p| seen.push(p),
+                cancelled,
+                &running::install_in_use,
+            );
             (result, seen)
         }
 
@@ -468,6 +477,7 @@ mod tests {
                 }
             },
             &|| false,
+            &running::install_in_use,
         );
         result.expect("apply");
         assert_eq!(attempts, [[true; 3]]);

@@ -993,6 +993,86 @@ fn file_held_open_before_first_write_is_before_write() {
 }
 
 #[test]
+fn read_only_file_before_first_write_is_file_denied() {
+    // 唯讀或權限另設、寫不進的遊戲檔：本 patch 還沒改動遊戲目錄就被拒絕存取＝寫入前中止。
+    let game = Game::new();
+    fs::write(game.path(DAT0), b"").expect("seed");
+    let set_readonly = |readonly: bool| {
+        let mut permissions = fs::metadata(game.path(DAT0)).expect("metadata").permissions();
+        permissions.set_readonly(readonly);
+        fs::set_permissions(game.path(DAT0), permissions).expect("permissions");
+    };
+    set_readonly(true);
+    let before = game.snapshot();
+    let result = apply(&game, &two_dat_patch());
+    let after = game.snapshot();
+    set_readonly(false);
+    assert!(
+        matches!(result, Err(ApplyFailure::BeforeWrite(AppError::GameFileDenied))),
+        "{result:?}"
+    );
+    assert_eq!(after, before, "第一筆寫入前中止，遊戲目錄不變");
+}
+
+#[test]
+fn wof_compressed_target_is_written_normally() {
+    // WOF 壓縮檔是不轉向的 reparse point（protocols §5.4.5），照常寫入，不當成連結。WOF filter 對一般開檔隱藏它的
+    // reparse tag，所以以「磁碟上大小變小、但沒有 NTFS 壓縮屬性」確認確實是 WOF。
+    use std::os::windows::fs::MetadataExt;
+    use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_COMPRESSED, GetCompressedFileSizeW};
+    const LEN: usize = 64 * 1024;
+    let game = Game::new();
+    let dat = game.path(DAT0);
+    fs::write(&dat, vec![0x5a; LEN]).expect("seed");
+    let status = Command::new("compact")
+        .args(["/c", "/f", "/exe:xpress4k"])
+        .arg(dat.components().collect::<PathBuf>())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("執行 compact");
+    assert!(status.success(), "compact /exe 失敗");
+    let mut high = 0u32;
+    // SAFETY: 路徑字串與 high 在呼叫期間存活。quality-allow: Win32 FFI，GetCompressedFileSizeW 沒有安全包裝
+    let low = unsafe { GetCompressedFileSizeW(&windows::core::HSTRING::from(dat.as_os_str()), Some(&mut high)) };
+    let on_disk = (u64::from(high) << 32) | u64::from(low);
+    let attributes = fs::metadata(&dat).expect("metadata").file_attributes();
+    assert!(on_disk < LEN as u64, "compact 後磁碟上大小應變小：{on_disk}");
+    assert_eq!(attributes & FILE_ATTRIBUTE_COMPRESSED.0, 0, "應是 WOF，不是 NTFS 壓縮");
+    let patch = Patch::new().sqpk(b'A', &add_data(0x03, 0x0100, 0, 0, &[0x11; 128], 0)).end();
+    apply(&game, &patch).expect("WOF 壓縮檔照常寫入");
+    let written = fs::read(game.path(DAT0)).expect("read");
+    assert!(written.windows(128).any(|w| w == [0x11; 128]), "寫入的資料在檔內");
+}
+
+#[test]
+fn scan_denied_on_game_path_is_file_denied() {
+    // 掃描時查遊戲目標路徑的屬性被拒絕存取：遊戲目錄還沒寫過，歸 GameFileDenied（helper exit 14），不是一般 I/O 錯誤。
+    // `locked` 不給列出內容（否則系統會經由它隱含給子項讀屬性的權限），裡面的 `x.dll` 不給任何權限。
+    let game = Game::new();
+    let (locked, item) = (game.path("locked"), game.path("locked/x.dll"));
+    crate::patch::access::test_support::create_dir_with_sddl(&locked, "D:P(D;;0x1;;;WD)(A;;FA;;;WD)");
+    crate::patch::access::test_support::create_dir_with_sddl(&item, "D:P");
+    let patch = Patch::new().sqpk(b'F', &add_file(b"locked\\x.dll", 0, &[raw_block(b"x")], 1)).end();
+    let mut reader = Cursor::new(patch.as_slice());
+    let result = scan_patch(&mut reader, &game.root()).err();
+    // 清理：tempdir 的遞迴刪除列不出 `locked`、讀不到 `x.dll`。icacls 以擁有者身分改 DACL，要先能列出 `locked`
+    // 才找得到 `x.dll`，所以依序放寬再刪。
+    for path in [&locked, &item] {
+        let status = Command::new("icacls")
+            .arg(path.components().collect::<PathBuf>())
+            .args(["/grant", "*S-1-1-0:(F)"])
+            .stdout(Stdio::null())
+            .status()
+            .expect("執行 icacls");
+        assert!(status.success(), "icacls 失敗");
+    }
+    fs::remove_dir(&item).expect("rmdir x.dll");
+    fs::remove_dir(&locked).expect("rmdir locked");
+    assert!(matches!(result, Some(AppError::GameFileDenied)), "{result:?}");
+}
+
+#[test]
 fn file_held_open_after_directory_change_is_after_write() {
     // 共用違規前已建過目錄：遊戲目錄已改動，依已寫入處理。
     let game = Game::new();
@@ -1134,6 +1214,9 @@ fn rejects_junction_in_sqpack_path() {
     junction(&game.path("sqpack/ex1"), &outside);
     let patch = Patch::new().sqpk(b'A', &add_data(0x03, 0x0100, 0, 0, &[1; 128], 0)).end();
     assert_eq!(scan_rule(&game, &patch), Rule::Link);
+    // 呼叫端看到的是專屬錯誤（程序內套用與 helper 的 exit 13 都靠它分辨）。
+    let mut reader = Cursor::new(patch.as_slice());
+    assert!(matches!(scan_patch(&mut reader, &game.root()), Err(AppError::GamePathLinked)));
     assert_eq!(fs::read_dir(outside).expect("read_dir").count(), 0);
 }
 
@@ -1171,7 +1254,7 @@ fn apply_rechecks_links_before_writing() {
     fs::remove_dir(game.path("sqpack/ex1")).expect("rmdir");
     junction(&game.path("sqpack/ex1"), &outside);
     let err = scanned.apply(&mut |_| {}).expect_err("must reject");
-    assert!(matches!(err, ApplyFailure::AfterWrite(AppError::PatchRejected { .. })), "{err:?}");
+    assert!(matches!(err, ApplyFailure::AfterWrite(AppError::GamePathLinked)), "{err:?}");
     assert_eq!(fs::read_dir(outside).expect("read_dir").count(), 0);
 }
 
@@ -1247,6 +1330,6 @@ fn write_version_rejects_junction() {
     junction(&game.path("sqpack/ex1"), &outside);
     let err = write_version(&game.root(), Repo::Expansion(1), "2026.08.07.0000.0000")
         .expect_err("must reject");
-    assert!(matches!(err, AppError::PatchRejected { .. }), "{err}");
+    assert!(matches!(err, AppError::GamePathLinked), "{err}");
     assert_eq!(fs::read_dir(outside).expect("read_dir").count(), 0);
 }
