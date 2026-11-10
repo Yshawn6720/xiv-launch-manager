@@ -216,7 +216,7 @@ export interface AccountInput {
 /** 本次載入哪些 plugin。 */
 export type PluginLoad = "all" | "noThirdParty" | "none";
 
-/** 本次是否比對衛月支援的遊戲版本（只有國際服 goatcorp 有這項比對）；skip＝使用者本次選了「強制載入」。 */
+/** 本次是否比對衛月支援的遊戲版本（國際服比對 SupportedGameVer、繁中服推定，protocols §1.5、§2.5）；skip＝使用者本次選了「強制載入」，或設定頁下載繁中服。 */
 export type GameVersionCheck = "enforce" | "skip";
 
 export interface ReleaseInfo {

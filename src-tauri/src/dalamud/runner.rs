@@ -19,10 +19,11 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
-use windows::Win32::Foundation::{HANDLE, HWND, LPARAM};
+use windows::Win32::Foundation::{HANDLE, HLOCAL, HWND, LPARAM, LocalFree};
+use windows::Win32::Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT, SetSecurityInfo};
 use windows::Win32::Security::{
-    ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, AddAccessAllowedAce, GetLengthSid, GetTokenInformation,
-    InitializeAcl, InitializeSecurityDescriptor, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
+    ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, AddAccessAllowedAce, DACL_SECURITY_INFORMATION, GetLengthSid,
+    GetTokenInformation, InitializeAcl, InitializeSecurityDescriptor, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
     SECURITY_DESCRIPTOR, SetSecurityDescriptorDacl, TOKEN_QUERY, TOKEN_USER, TokenUser,
 };
 use windows::Win32::System::SystemServices::SECURITY_DESCRIPTOR_REVISION;
@@ -128,8 +129,8 @@ async fn launch_via_injector(req: &InjectRequest) -> AppResult<GameProcess> {
 
 /// 自行啟動遊戲，等可見頂層視窗出現後再 `inject -v {pid}`。任何失敗都只結束這個 pid。
 async fn launch_then_attach(req: &InjectRequest) -> AppResult<GameProcess> {
-    let process = spawn_game(&req.game_exe, &req.game_args, &req.runtime_dir)?;
-    match attach(req, &process).await {
+    let (process, handle) = spawn_game(&req.game_exe, &req.game_args, &req.runtime_dir)?;
+    match attach(req, &process, handle).await {
         Ok(()) => Ok(process),
         Err(e) => {
             if profile::is_alive(&process) {
@@ -141,7 +142,8 @@ async fn launch_then_attach(req: &InjectRequest) -> AppResult<GameProcess> {
     }
 }
 
-async fn attach(req: &InjectRequest, process: &GameProcess) -> AppResult<()> {
+/// `handle` 是建立遊戲時取得的程序 handle（[`spawn_game`]），注入期間用它暫時開放遊戲程序（[`InjectorAccess`]）。
+async fn attach(req: &InjectRequest, process: &GameProcess, handle: OwnedHandle) -> AppResult<()> {
     wait_for_window(process).await?;
     let delay = req.delay_ms.max(MIN_ATTACH_DELAY_MS);
     tokio::time::sleep(Duration::from_millis(u64::from(delay))).await;
@@ -154,6 +156,8 @@ async fn attach(req: &InjectRequest, process: &GameProcess) -> AppResult<()> {
     let runtime_dir = req.runtime_dir.clone();
     let work_dir = req.injector_dir.clone();
     let outcome = install::run_blocking("執行 Injector", move || {
+        let _access = InjectorAccess::grant(&handle)
+            .map_err(|e| AppError::io("讓 Injector 開啟遊戲程序", e.into()))?;
         run_injector(&exe, &args, &runtime_dir, &work_dir)
     })
     .await?;
@@ -161,6 +165,72 @@ async fn attach(req: &InjectRequest, process: &GameProcess) -> AppResult<()> {
     match outcome.exit_code {
         Some(0) => Ok(()),
         exit_code => Err(AppError::InjectorFailed { exit_code }),
+    }
+}
+
+/// 注入期間讓目前使用者能以 `PROCESS_ALL_ACCESS` 開啟遊戲程序（protocols §2.5 注入步驟 3、5）。台服客戶端啟動
+/// 後會把自己的 DACL 收緊成只有系統管理員與 SYSTEM 能寫入記憶體，一般權限的 Injector 因此開不了遊戲。
+/// [`grant`](Self::grant) 存下遊戲程序現在的 DACL、換成只給目前使用者完整權限；Drop 時寫回存下的 DACL。
+/// 寫回只影響之後開啟的 handle，不撤銷期間已開啟的。
+struct InjectorAccess<'a> {
+    process: &'a OwnedHandle,
+    /// `GetSecurityInfo` 配置的 security descriptor，Drop 時以 `LocalFree` 釋放；`dacl` 指向它的內部。
+    descriptor: PSECURITY_DESCRIPTOR,
+    /// 原本的 DACL；null＝NULL DACL。
+    dacl: *mut ACL,
+}
+
+impl<'a> InjectorAccess<'a> {
+    /// `process` 須含 `READ_CONTROL` 與 `WRITE_DAC`（建立程序時取得的 handle 有全部權限）。
+    fn grant(process: &'a OwnedHandle) -> windows::core::Result<Self> {
+        let handle = HANDLE(process.as_raw_handle());
+        let mut dacl: *mut ACL = std::ptr::null_mut();
+        let mut descriptor = PSECURITY_DESCRIPTOR::default();
+        // SAFETY: handle 是呼叫端持有、含 READ_CONTROL 的程序 handle；dacl／descriptor 是存活中的區域變數。
+        // 成功時 descriptor 由系統以 LocalAlloc 配置，交給回傳值的 Drop 以 LocalFree 釋放一次。
+        // quality-allow: Win32 FFI，GetSecurityInfo 沒有安全包裝
+        unsafe {
+            GetSecurityInfo(
+                handle,
+                SE_KERNEL_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                Some(&raw mut dacl),
+                None,
+                Some(&raw mut descriptor),
+            )
+        }
+        .ok()?;
+        // 先建好 guard：之後任一步失敗，Drop 都會寫回原本的 DACL 並釋放 descriptor。
+        let saved = Self { process, descriptor, dacl };
+        let full = SingleUserDacl::for_current_user(PROCESS_ALL_ACCESS.0)?;
+        // SAFETY: handle 含 WRITE_DAC；full 的 ACL 緩衝區在呼叫期間存活。只帶 DACL_SECURITY_INFORMATION，
+        // 不動擁有者與 mandatory label。
+        // quality-allow: Win32 FFI，SetSecurityInfo 沒有安全包裝
+        unsafe {
+            SetSecurityInfo(handle, SE_KERNEL_OBJECT, DACL_SECURITY_INFORMATION, None, None, Some(full.as_ptr()), None)
+        }
+        .ok()?;
+        Ok(saved)
+    }
+}
+
+impl Drop for InjectorAccess<'_> {
+    fn drop(&mut self) {
+        let handle = HANDLE(self.process.as_raw_handle());
+        let dacl = (!self.dacl.is_null()).then_some(self.dacl.cast_const());
+        // SAFETY: handle 仍由 self.process 持有；dacl 指向 self.descriptor 內部，descriptor 在下方 LocalFree 前有效。
+        // dacl 為 None 時寫回的是原本的 NULL DACL。
+        let restored =
+            // quality-allow: Win32 FFI，SetSecurityInfo 沒有安全包裝；寫回失敗下方記 log
+            unsafe { SetSecurityInfo(handle, SE_KERNEL_OBJECT, DACL_SECURITY_INFORMATION, None, None, dacl, None) };
+        if let Err(e) = restored.ok() {
+            eprintln!("寫回遊戲程序原本的存取權限失敗：{e}");
+        }
+        // SAFETY: descriptor 由 GetSecurityInfo 以 LocalAlloc 配置，只在這裡釋放一次，之後不再使用 dacl。
+        // quality-allow: Win32 FFI，LocalFree 沒有安全包裝
+        unsafe { LocalFree(Some(HLOCAL(self.descriptor.0))) };
     }
 }
 
@@ -230,9 +300,10 @@ fn game_work_dir(game_exe: &Path) -> AppResult<&Path> {
     })
 }
 
-/// attach 用：啟動遊戲（工作目錄＝執行檔所在目錄、預設 DACL，Injector 之後要以同使用者寫入遊戲
-/// 記憶體）並取得程序身分。`runtime_dir` 設在遊戲子程序：遊戲內的 Dalamud.Boot 讀它找 .NET runtime。
-fn spawn_game(game_exe: &Path, game_args: &str, runtime_dir: &Path) -> AppResult<GameProcess> {
+/// attach 用：啟動遊戲（工作目錄＝執行檔所在目錄、預設 DACL）並取得程序身分與建立時的程序 handle（全部權限，
+/// 遊戲之後收緊自己的 DACL 也不影響這個 handle）。`runtime_dir` 設在遊戲子程序：遊戲內的 Dalamud.Boot 讀它找
+/// .NET runtime。
+fn spawn_game(game_exe: &Path, game_args: &str, runtime_dir: &Path) -> AppResult<(GameProcess, OwnedHandle)> {
     let child = Command::new(game_exe)
         .args(split_game_args(game_args))
         .current_dir(game_work_dir(game_exe)?)
@@ -245,8 +316,8 @@ fn spawn_game(game_exe: &Path, game_args: &str, runtime_dir: &Path) -> AppResult
         .map_err(|e| AppError::io("啟動遊戲", e))?;
     // 持有 child handle 直到取得建立時間：程序即使秒退，pid 也不會在這之前被重用。
     let identity = profile::process_identity(child.id());
-    drop(child);
-    identity?.ok_or(AppError::GameExitedEarly)
+    let handle = OwnedHandle::from(child);
+    Ok((identity?.ok_or(AppError::GameExitedEarly)?, handle))
 }
 
 /// 授予目前使用者的程序權限：全部權限去掉 `PROCESS_VM_WRITE`（0x1FFFDF，同 XL 的
@@ -265,7 +336,7 @@ fn spawn_without_vm_write<'a>(
     let application = wide_nul(exe.as_os_str()).map_err(|e| AppError::io("啟動遊戲", e))?;
     let current_dir = wide_nul(work_dir.as_os_str()).map_err(|e| AppError::io("啟動遊戲", e))?;
     let mut command_line = command_line(exe, args).map_err(|e| AppError::io("啟動遊戲", e))?;
-    let dacl = RestrictedDacl::for_current_user().map_err(launch_error)?;
+    let dacl = SingleUserDacl::for_current_user(RESTRICTED_PROCESS_ACCESS).map_err(launch_error)?;
 
     let mut descriptor = SECURITY_DESCRIPTOR::default();
     let descriptor_ptr = PSECURITY_DESCRIPTOR((&raw mut descriptor).cast());
@@ -333,12 +404,12 @@ fn spawn_without_vm_write<'a>(
     started
 }
 
-/// 只有一筆 ACE 的 DACL：目前使用者（程序 token 的 TokenUser）取得 [`RESTRICTED_PROCESS_ACCESS`]。
+/// 只有一筆 ACE 的 DACL：目前使用者（程序 token 的 TokenUser）取得 `access`。
 /// 以 `u32` 陣列持有，滿足 ACL 的 DWORD 對齊；Drop 時一併釋放。
-struct RestrictedDacl(Vec<u32>);
+struct SingleUserDacl(Vec<u32>);
 
-impl RestrictedDacl {
-    fn for_current_user() -> windows::core::Result<Self> {
+impl SingleUserDacl {
+    fn for_current_user(access: u32) -> windows::core::Result<Self> {
         let token_user = current_token_user()?;
         // SAFETY: token_user 以 usize 對齊、內容由 GetTokenInformation(TokenUser) 寫入，開頭即為
         // TOKEN_USER，其 SID 指標指向同一緩衝區內；緩衝區在本函式結束前都存活。
@@ -356,7 +427,7 @@ impl RestrictedDacl {
         // quality-allow: Win32 FFI，ACL API 沒有安全包裝
         unsafe {
             InitializeAcl(acl, (buf.len() * size_of::<u32>()) as u32, ACL_REVISION)?;
-            AddAccessAllowedAce(acl, ACL_REVISION, RESTRICTED_PROCESS_ACCESS, sid)?;
+            AddAccessAllowedAce(acl, ACL_REVISION, access, sid)?;
         }
         Ok(Self(buf))
     }
@@ -793,6 +864,59 @@ mod tests {
 
         assert_eq!(write.map_err(|e| e.code()), Err(E_ACCESSDENIED));
         assert!(query.is_ok());
+    }
+
+    /// 遊戲把自己的 DACL 收緊成目前使用者開不了（protocols §2.5 注入步驟 3）：guard 期間能以 `PROCESS_ALL_ACCESS`
+    /// 開啟，drop 後回到遊戲自己的 DACL。模擬用空 DACL，不放 BA：以系統管理員身分跑測試時 BA ACE 會讓收緊無效。
+    #[test]
+    fn injector_access_opens_a_self_protected_process_and_restores_its_dacl() {
+        use windows::Win32::Foundation::E_ACCESSDENIED;
+        use windows::Win32::System::Threading::OpenProcess;
+
+        let child = Command::new(r"C:\Windows\System32\waitfor.exe")
+            .args(["/t", "60", &format!("xlm{}", uuid::Uuid::new_v4().simple())])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn");
+        let pid = child.id();
+        let process = OwnedHandle::from(child);
+        let raw = HANDLE(process.as_raw_handle());
+
+        let mut empty = [0u32; 2];
+        let empty_acl: *mut ACL = empty.as_mut_ptr().cast();
+        // SAFETY: empty 是 8 bytes、DWORD 對齊的區域緩衝區，正好放得下沒有 ACE 的 ACL 標頭；raw 是建立程序時取得、
+        // 含 WRITE_DAC 的 handle。只帶 DACL_SECURITY_INFORMATION。
+        // quality-allow: Win32 FFI，模擬遊戲收緊自己的 DACL
+        unsafe {
+            InitializeAcl(empty_acl, size_of_val(&empty) as u32, ACL_REVISION).expect("init acl");
+            SetSecurityInfo(raw, SE_KERNEL_OBJECT, DACL_SECURITY_INFORMATION, None, None, Some(empty_acl), None)
+                .ok()
+                .expect("tighten dacl");
+        }
+
+        // SAFETY: OpenProcess 只讀值參數；成功的 handle 立即交給 OwnedHandle 獨占並關閉。
+        let open_all = || {
+            // quality-allow: Win32 FFI，OpenProcess 沒有安全包裝
+            unsafe { OpenProcess(PROCESS_ALL_ACCESS, false, pid) }
+                // quality-allow: Win32 FFI，接手 OpenProcess 剛回傳的原始 handle
+                .map(|h| drop(unsafe { OwnedHandle::from_raw_handle(h.0) }))
+                .map_err(|e| e.code())
+        };
+        let before = open_all();
+        let during = {
+            let _access = InjectorAccess::grant(&process).expect("grant");
+            open_all()
+        };
+        let after = open_all();
+        // SAFETY: raw 由 process 持有、含 PROCESS_TERMINATE。
+        // quality-allow: Win32 FFI，結束測試替身
+        unsafe { TerminateProcess(raw, 1) }.expect("terminate");
+
+        assert_eq!(before, Err(E_ACCESSDENIED), "模擬的收緊沒有生效");
+        assert_eq!(during, Ok(()));
+        assert_eq!(after, Err(E_ACCESSDENIED));
     }
 
     /// 時間窗內一直在執行回 Ok；時間窗內結束回 `GameExitedEarly`。

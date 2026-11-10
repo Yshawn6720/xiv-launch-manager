@@ -101,6 +101,9 @@ pub enum AppError {
     DalamudLeaseUnavailable,
     #[error("Dalamud 目前只支援遊戲版本 {supported}，本機遊戲已是 {installed}（遊戲剛改版，需等 Dalamud 更新）；可在登入頁「進階 › 本次載入方式」選「不載入 Dalamud」後再登入，或選「強制載入（忽略遊戲版本）」自行承擔遊戲崩潰的風險")]
     DalamudGameVersionMismatch { supported: String, installed: String },
+    /// 繁中服 Dalamud 推定是舊版遊戲用的（protocols §2.5「版本比對」）；yanmucorp 沒有支援版本資料，只能推定。
+    #[error("繁中服 Dalamud {tag} 比本機遊戲版本 {installed} 舊，可能還不支援（遊戲剛改版時通常要等 Dalamud 更新）；可在登入頁「進階 › 本次載入方式」選「不載入 Dalamud」後再登入，或選「強制載入（忽略遊戲版本）」自行承擔遊戲崩潰的風險")]
+    DalamudOlderThanGame { tag: String, installed: String },
     #[error("檔案完整性核對失敗：{file}")]
     Integrity { file: String },
     #[error("安裝失敗（{context}）")]

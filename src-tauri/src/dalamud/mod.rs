@@ -50,9 +50,9 @@ pub struct PreparedDalamud {
     pub inject_mode: InjectMode,
 }
 
-/// 依版本選擇確保本體、runtime、assets 就緒。goatcorp 另需本機遊戲版本與
-/// `SupportedGameVer` 相符（`install_dir`＝該區服遊戲安裝根目錄），`check` 為 `Skip` 時不比對；yanmucorp 沒有
-/// 這項比對，忽略 `check`。被 `cancel` 取消時回 `Cancelled`。
+/// 依版本選擇確保本體、runtime、assets 就緒（`install_dir`＝該區服遊戲安裝根目錄）。下載前先比對本機遊戲版本：
+/// goatcorp 要 `SupportedGameVer` 相符（protocols §1.5），yanmucorp 推定 tag 不是舊版遊戲用的（§2.5「版本比對」）；
+/// `check` 為 `Skip` 時都不比對。被 `cancel` 取消時回 `Cancelled`。
 pub async fn prepare(
     paths: &AppPaths,
     channel: &DalamudChannel,
@@ -95,6 +95,7 @@ pub async fn prepare(
         }
         DalamudChannel::Yanmucorp { version } => {
             let tag = cancel.race(yanmucorp::resolve_tag(&client, version)).await?;
+            yanmucorp::check_game_version(paths, &tag, install_dir, check)?;
             let injector_dir = yanmucorp::ensure_body(&client, paths, &tag, progress, cancel).await?;
             let runtime_dir = runtime::ensure_nuget(
                 &client,
@@ -138,6 +139,8 @@ pub struct PreparedCache(Mutex<Option<CachedPrepare>>);
 struct CachedPrepare {
     channel: DalamudChannel,
     install_dir: PathBuf,
+    /// 準備時是否比對遊戲版本：`Skip`（強制載入、設定頁下載）準備的結果不給 `Enforce` 的登入沿用。
+    check: GameVersionCheck,
     prepared: PreparedDalamud,
     /// 準備時 runtime 目錄在不在：goatcorp `RuntimeRequired` 為假時不下載，目錄可能本來就不存在。
     runtime_present: bool,
@@ -146,10 +149,11 @@ struct CachedPrepare {
 
 impl PreparedCache {
     /// 記下剛準備好的結果，取代前一筆。
-    pub fn store(&self, channel: &DalamudChannel, install_dir: &Path, prepared: &PreparedDalamud) {
+    pub fn store(&self, channel: &DalamudChannel, install_dir: &Path, check: GameVersionCheck, prepared: &PreparedDalamud) {
         *self.lock() = Some(CachedPrepare {
             channel: channel.clone(),
             install_dir: install_dir.to_path_buf(),
+            check,
             prepared: prepared.clone(),
             runtime_present: prepared.runtime_dir.is_dir(),
             at: Instant::now(),
@@ -157,24 +161,29 @@ impl PreparedCache {
     }
 
     /// 有可沿用的結果就用它，不 await `prepare`；沒有才 await `prepare` 完整準備（線上取版本與 assets 清單、逐檔核對，
-    /// 核對失敗就重新下載）。可沿用＝同通道、同遊戲安裝、[`REUSE_WINDOW`] 內準備好，本體依目錄內 `hashes.json`
-    /// 重核通過（同完整準備對已安裝本體的核對），assets 目錄與準備時就在的 runtime 目錄仍在。不論沿用與否，
-    /// 暫存的結果都只用一次。
+    /// 核對失敗就重新下載）。可沿用＝同通道、同遊戲安裝、同版本比對選擇、[`REUSE_WINDOW`] 內準備好，本體依目錄內
+    /// `hashes.json` 重核通過（同完整準備對已安裝本體的核對），assets 目錄與準備時就在的 runtime 目錄仍在。不論沿用
+    /// 與否，暫存的結果都只用一次。
     pub async fn reuse_or_prepare(
         &self,
         channel: &DalamudChannel,
         install_dir: &Path,
+        check: GameVersionCheck,
         prepare: impl Future<Output = AppResult<PreparedDalamud>>,
     ) -> AppResult<PreparedDalamud> {
-        if let Some(prepared) = self.take(channel, install_dir).await {
+        if let Some(prepared) = self.take(channel, install_dir, check).await {
             return Ok(prepared);
         }
         prepare.await
     }
 
-    async fn take(&self, channel: &DalamudChannel, install_dir: &Path) -> Option<PreparedDalamud> {
+    async fn take(&self, channel: &DalamudChannel, install_dir: &Path, check: GameVersionCheck) -> Option<PreparedDalamud> {
         let cached = self.lock().take()?;
-        if cached.channel != *channel || cached.install_dir != install_dir || cached.at.elapsed() > REUSE_WINDOW {
+        if cached.channel != *channel
+            || cached.install_dir != install_dir
+            || cached.check != check
+            || cached.at.elapsed() > REUSE_WINDOW
+        {
             return None;
         }
         let prepared = cached.prepared;
@@ -428,9 +437,19 @@ mod tests {
         install_dir: &Path,
         fallback: &PreparedDalamud,
     ) -> bool {
+        prepared_fully_with(cache, channel, install_dir, GameVersionCheck::Enforce, fallback).await
+    }
+
+    async fn prepared_fully_with(
+        cache: &PreparedCache,
+        channel: &DalamudChannel,
+        install_dir: &Path,
+        check: GameVersionCheck,
+        fallback: &PreparedDalamud,
+    ) -> bool {
         let called = std::cell::Cell::new(false);
         cache
-            .reuse_or_prepare(channel, install_dir, async {
+            .reuse_or_prepare(channel, install_dir, check, async {
                 called.set(true);
                 Ok(fallback.clone())
             })
@@ -447,9 +466,11 @@ mod tests {
         let channel = yanmucorp(YanmucorpVersion::Latest);
         let cache = PreparedCache::default();
 
-        cache.store(&channel, &install_dir, &prepared);
+        cache.store(&channel, &install_dir, GameVersionCheck::Enforce, &prepared);
         let reused = cache
-            .reuse_or_prepare(&channel, &install_dir, async { panic!("已準備好時不應再完整準備") })
+            .reuse_or_prepare(&channel, &install_dir, GameVersionCheck::Enforce, async {
+                panic!("已準備好時不應再完整準備")
+            })
             .await
             .expect("reuse");
         assert_eq!(reused.injector_dir, prepared.injector_dir);
@@ -468,29 +489,39 @@ mod tests {
 
         assert!(prepared_fully(&cache, &channel, &install_dir, &prepared).await, "沒有先準備");
 
-        cache.store(&channel, &install_dir, &prepared);
+        cache.store(&channel, &install_dir, GameVersionCheck::Enforce, &prepared);
         let pinned = yanmucorp(YanmucorpVersion::Pinned { tag: "26-09-28-01".into() });
         assert!(prepared_fully(&cache, &pinned, &install_dir, &prepared).await, "版本選擇不同");
 
-        cache.store(&channel, &install_dir, &prepared);
+        cache.store(&channel, &install_dir, GameVersionCheck::Enforce, &prepared);
         let other_install = dir.path().join("other");
         assert!(prepared_fully(&cache, &channel, &other_install, &prepared).await, "遊戲安裝不同");
 
-        cache.store(&channel, &install_dir, &prepared);
+        cache.store(&channel, &install_dir, GameVersionCheck::Enforce, &prepared);
         cache.lock().as_mut().expect("stored").at = Instant::now()
             .checked_sub(REUSE_WINDOW + Duration::from_secs(1))
             .expect("instant");
         assert!(prepared_fully(&cache, &channel, &install_dir, &prepared).await, "不是剛準備好的");
 
         // 本體重核不符：完整準備（核對不符就重新下載）。
-        cache.store(&channel, &install_dir, &prepared);
+        cache.store(&channel, &install_dir, GameVersionCheck::Enforce, &prepared);
         let injector = prepared.injector_dir.join(install::INJECTOR_EXE);
         fs::write(&injector, b"tampered").expect("tamper");
         assert!(prepared_fully(&cache, &channel, &install_dir, &prepared).await, "本體核對失敗");
         fs::write(&injector, INJECTOR_BYTES).expect("restore");
 
-        cache.store(&channel, &install_dir, &prepared);
+        cache.store(&channel, &install_dir, GameVersionCheck::Enforce, &prepared);
         fs::remove_dir(&prepared.assets_dir).expect("rm assets");
         assert!(prepared_fully(&cache, &channel, &install_dir, &prepared).await, "assets 目錄不見了");
+        fs::create_dir_all(&prepared.assets_dir).expect("restore assets");
+
+        // 不比對遊戲版本（設定頁下載、強制載入）準備的結果，不給比對的登入沿用。
+        cache.store(&channel, &install_dir, GameVersionCheck::Skip, &prepared);
+        assert!(prepared_fully(&cache, &channel, &install_dir, &prepared).await, "版本比對選擇不同");
+        cache.store(&channel, &install_dir, GameVersionCheck::Skip, &prepared);
+        assert!(
+            !prepared_fully_with(&cache, &channel, &install_dir, GameVersionCheck::Skip, &prepared).await,
+            "同為強制載入可沿用"
+        );
     }
 }

@@ -826,7 +826,8 @@ fn install_channel(region: Region, version: Option<YanmucorpVersion>) -> AppResu
 }
 
 /// 下載並安裝某區服的衛月（不啟動遊戲）；安裝目錄依版本共用，與設定檔無關。回傳安裝好的版本。
-/// `version_check` 只在登入前準備、使用者本次選了「強制載入」時為 `Skip`（protocols §1.5）。
+/// `version_check` 為 `Skip` 時不比對遊戲版本：登入前準備時使用者本次選了「強制載入」，或設定頁下載繁中服
+/// （protocols §1.5、§2.5「版本比對」）。
 #[tauri::command]
 pub async fn install_dalamud(
     app: AppHandle,
@@ -854,7 +855,7 @@ pub async fn install_dalamud(
         &cancel,
     )
     .await?;
-    state.prepared_dalamud.store(&channel, &install, &prepared);
+    state.prepared_dalamud.store(&channel, &install, version_check, &prepared);
     Ok(prepared.version)
 }
 

@@ -55,7 +55,7 @@ pub struct LaunchOptions {
     /// 本次載入哪些 plugin；不載入衛月時不使用。
     #[serde(default)]
     pub plugins: PluginLoad,
-    /// 本次是否比對衛月支援的遊戲版本（只有 goatcorp 有這項比對）；不載入衛月時不使用。
+    /// 本次是否比對衛月支援的遊戲版本（國際服比對 `SupportedGameVer`、繁中服推定，protocols §1.5、§2.5）；不載入衛月時不使用。
     #[serde(default)]
     pub version_check: GameVersionCheck,
 }
@@ -571,7 +571,7 @@ async fn prepare_profile(
         return Ok(None);
     };
     let prepare = prepare_dalamud(app, paths, account_id, &p.channel, install, check, cancel);
-    Ok(Some(prepared_cache.reuse_or_prepare(&p.channel, install, prepare).await?))
+    Ok(Some(prepared_cache.reuse_or_prepare(&p.channel, install, check, prepare).await?))
 }
 
 #[cfg(test)]

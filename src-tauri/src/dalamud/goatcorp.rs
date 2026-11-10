@@ -43,7 +43,8 @@ pub async fn fetch_version_info(client: &reqwest::Client) -> AppResult<VersionIn
     Ok(info)
 }
 
-/// 本次登入是否比對 `SupportedGameVer`（protocols §1.5）。預設比對；`Skip` 只在使用者該次登入選「強制載入」時送來。
+/// 本次是否比對遊戲版本（國際服 `SupportedGameVer`，protocols §1.5；繁中服推定，§2.5「版本比對」）。預設比對；`Skip`
+/// 只在使用者該次登入選「強制載入」，或設定頁下載繁中服時送來。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum GameVersionCheck {

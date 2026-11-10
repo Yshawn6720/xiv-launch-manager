@@ -187,14 +187,22 @@ const DALAMUD_MODE_TEXT: Record<DalamudMode, string> = {
   noThirdParty: "不載入第三方 plugin",
   noPlugin: "不載入任何 plugin",
   off: "不載入 Dalamud",
-  // 只有國際服（goatcorp 才有遊戲版本比對）；送出前警告確認，送出後回到「正常」（protocols §1.5）。
+  // 兩服都有：國際服略過 SupportedGameVer 比對、繁中服略過 §2.5 的推定比對；送出前警告確認，送出後回到「正常」（protocols §1.5）。
   force: "強制載入（忽略遊戲版本）",
 };
 
-const FORCE_DALAMUD_WARNING =
-  "強制載入會略過 Dalamud 的遊戲版本檢查。\n\n" +
-  "遊戲剛改版、Dalamud 官方還沒支援新版本時硬注入，可能讓遊戲崩潰，或讓插件讀錯資料而行為異常。官方 XIVLauncher 不提供這個選項。\n\n" +
-  "這個選擇只用於這一次登入，之後回到「正常」。仍要強制載入嗎？";
+/** 強制載入的確認文字。繁中服的比對是推定（protocols §2.5「版本比對」）：強制載入後 Dalamud 存下新版的快取，之後同版本不再擋。 */
+function forceDalamudWarning(region: Region): string {
+  const scope =
+    region === "tw"
+      ? "下拉選單送出後會回到「正常」；但 Dalamud 在這個遊戲版本跑過一次就會留下快取，之後同一個 Dalamud 版本在同一個遊戲版本不會再擋，要到遊戲下次改版才會再提示。仍要強制載入嗎？"
+      : "這個選擇只用於這一次登入，之後回到「正常」。仍要強制載入嗎？";
+  return (
+    "強制載入會略過 Dalamud 的遊戲版本檢查。\n\n" +
+    "遊戲剛改版、Dalamud 官方還沒支援新版本時硬注入，可能讓遊戲崩潰，或讓插件讀錯資料而行為異常。官方 XIVLauncher 不提供這個選項。\n\n" +
+    scope
+  );
+}
 
 export let draft: LoginDraft | null = null;
 
@@ -896,9 +904,6 @@ export function renderLogin(): void {
     dalamudLine.replaceChildren(...(c?.profile ? profileDetails(c.profile, c.path, a !== null) : []));
     dalamudLine.hidden = !c?.profile;
     dalamudModeField.hidden = !applied();
-    // 強制載入只對國際服有意義；換區服時 d.dalamudMode 已重設為正常。
-    const force = modeOptions.find((o) => o.value === "force");
-    if (force) force.hidden = force.disabled = d.region !== "global";
     paintAdvanced();
   };
   actFollow.addEventListener("change", () => {
@@ -1054,8 +1059,8 @@ export function renderLogin(): void {
     const label = d.name.trim() || d.username.trim();
     const mode = applied() ? d.dalamudMode : "normal";
     if (mode === "force") {
-      if (!confirm(FORCE_DALAMUD_WARNING)) return;
-      // 每次都要重選：送出後就回到「正常」，下次登入不沿用。
+      if (!confirm(forceDalamudWarning(d.region))) return;
+      // 下拉送出後回到「正常」，下次登入不沿用這個選擇（繁中服另有 Dalamud 快取的效果，見 forceDalamudWarning）。
       d.dalamudMode = "normal";
       dalamudMode.value = "normal";
       paintAdvanced();

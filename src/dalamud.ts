@@ -538,7 +538,8 @@ function installRegion(region: Region, version: YanmucorpVersion | null): void {
   installProgress?.cancel.focus();
   void run(`下載${regionLabel(region)} Dalamud`, async () => {
     try {
-      const dir = await api.installDalamud(region, version, "enforce");
+      // 設定頁下載不是注入：繁中服不做版本推定，才能下載舊 tag 回滾（protocols §2.5「版本比對」）。
+      const dir = await api.installDalamud(region, version, region === "tw" ? "skip" : "enforce");
       return `已下載${regionLabel(region)} ${dalamudVersionLabel(region, dir, await installedDalamudVersion(region, dir))}`;
     } finally {
       // 在 run() 重繪之前清掉，重建的面板就回到一般狀態。
