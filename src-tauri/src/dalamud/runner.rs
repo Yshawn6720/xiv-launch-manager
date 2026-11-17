@@ -51,7 +51,7 @@ const EARLY_EXIT_WINDOW: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// 第一行輸出的上限；正常只有一行短 JSON。
 const MAX_FIRST_LINE: u64 = 64 * 1024;
-/// attach：等遊戲出現可見頂層視窗的上限。
+/// 遊戲開出後等它出現可見頂層視窗的上限（三種啟動方式都等；attach 等到才注入）。
 const WINDOW_TIMEOUT: Duration = Duration::from_secs(60);
 /// attach：視窗出現後至少再等這麼久才注入（同 TC 啟動器）。
 const MIN_ATTACH_DELAY_MS: u32 = 3000;
@@ -93,7 +93,8 @@ pub struct InjectRequest {
     pub plugins: PluginLoad,
 }
 
-/// 依 [`InjectMode`] 注入並啟動遊戲。成功回傳遊戲程序身分；不等提早結束的觀察（[`watch_early_exit`]）。
+/// 依 [`InjectMode`] 注入並啟動遊戲。遊戲出現可見視窗才回傳程序身分（[`require_window`]）；不等提早結束的觀察
+/// （[`watch_early_exit`]）。
 pub async fn launch_with_dalamud(req: &InjectRequest) -> AppResult<GameProcess> {
     match req.mode {
         InjectMode::Launch => launch_via_injector(req).await,
@@ -124,7 +125,8 @@ async fn launch_via_injector(req: &InjectRequest) -> AppResult<GameProcess> {
             return Err(AppError::InjectorFailed { exit_code });
         }
     };
-    profile::process_identity(pid)?.ok_or(AppError::GameExitedEarly)
+    let process = profile::process_identity(pid)?.ok_or(AppError::GameExitedEarly)?;
+    require_window(process, WINDOW_TIMEOUT).await
 }
 
 /// 自行啟動遊戲，等可見頂層視窗出現後再 `inject -v {pid}`。任何失敗都只結束這個 pid。
@@ -144,7 +146,7 @@ async fn launch_then_attach(req: &InjectRequest) -> AppResult<GameProcess> {
 
 /// `handle` 是建立遊戲時取得的程序 handle（[`spawn_game`]），注入期間用它暫時開放遊戲程序（[`InjectorAccess`]）。
 async fn attach(req: &InjectRequest, process: &GameProcess, handle: OwnedHandle) -> AppResult<()> {
-    wait_for_window(process).await?;
+    wait_for_window(process, WINDOW_TIMEOUT).await?;
     let delay = req.delay_ms.max(MIN_ATTACH_DELAY_MS);
     tokio::time::sleep(Duration::from_millis(u64::from(delay))).await;
     if !profile::is_alive(process) {
@@ -234,9 +236,24 @@ impl Drop for InjectorAccess<'_> {
     }
 }
 
-/// 輪詢直到遊戲有可見頂層視窗。期間遊戲結束回 `GameExitedEarly`；逾時回 `InjectorFailed`。
-async fn wait_for_window(process: &GameProcess) -> AppResult<()> {
-    let deadline = tokio::time::Instant::now() + WINDOW_TIMEOUT;
+/// 等遊戲出現可見頂層視窗；沒等到（遊戲結束或逾時）就結束仍在執行的遊戲並回錯。程序開出卻沒有視窗時不能回報
+/// 成功：使用者看不到遊戲，重試只會再多一個卡住的程序。
+async fn require_window(process: GameProcess, timeout: Duration) -> AppResult<GameProcess> {
+    match wait_for_window(&process, timeout).await {
+        Ok(()) => Ok(process),
+        Err(e) => {
+            if profile::is_alive(&process) {
+                // quality-allow: 失敗路徑的善後，結束不了也不能蓋掉沒有視窗的主因
+                let _ = profile::terminate(process.pid);
+            }
+            Err(e)
+        }
+    }
+}
+
+/// 輪詢直到遊戲有可見頂層視窗。期間遊戲結束回 `GameExitedEarly`；逾時回 `GameWindowMissing`。
+async fn wait_for_window(process: &GameProcess, timeout: Duration) -> AppResult<()> {
+    let deadline = tokio::time::Instant::now() + timeout;
     loop {
         if !profile::is_alive(process) {
             return Err(AppError::GameExitedEarly);
@@ -245,7 +262,9 @@ async fn wait_for_window(process: &GameProcess) -> AppResult<()> {
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
-            return Err(AppError::InjectorFailed { exit_code: None });
+            return Err(AppError::GameWindowMissing {
+                seconds: timeout.as_secs(),
+            });
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
@@ -285,13 +304,15 @@ unsafe extern "system" fn match_visible_window(hwnd: HWND, lparam: LPARAM) -> BO
     BOOL::from(true)
 }
 
-/// 不帶衛月直接啟動遊戲（工作目錄＝執行檔所在目錄）。開出遊戲就回傳，不等提早結束的觀察（[`watch_early_exit`]）。
+/// 不帶衛月直接啟動遊戲（工作目錄＝執行檔所在目錄）。遊戲出現可見視窗才回傳（[`require_window`]）；不等提早結束
+/// 的觀察（[`watch_early_exit`]）。
 ///
 /// 遊戲程序的 DACL 不給目前使用者 `PROCESS_VM_WRITE`：國際服客戶端發現 DACL 允許 VM_WRITE 時會以
 /// 受限 DACL 重新啟動自己，原 pid 隨即結束（被誤判成提早結束，也追丟遊戲）。做法同 XIVLauncher
 /// `NativeAclFix.LaunchGame`。
 pub async fn launch_plain(game_exe: &Path, game_args: &str) -> AppResult<GameProcess> {
-    spawn_without_vm_write(game_exe, split_game_args(game_args), game_work_dir(game_exe)?)
+    let process = spawn_without_vm_write(game_exe, split_game_args(game_args), game_work_dir(game_exe)?)?;
+    require_window(process, WINDOW_TIMEOUT).await
 }
 
 fn game_work_dir(game_exe: &Path) -> AppResult<&Path> {
@@ -917,6 +938,32 @@ mod tests {
         assert_eq!(before, Err(E_ACCESSDENIED), "模擬的收緊沒有生效");
         assert_eq!(during, Ok(()));
         assert_eq!(after, Err(E_ACCESSDENIED));
+    }
+
+    /// 程序開出卻一直沒有視窗（卡在初始化）：回 `GameWindowMissing`，並結束該程序。
+    #[tokio::test]
+    async fn windowless_game_is_reported_and_terminated() {
+        // 沒有視窗的遊戲替身：waitfor 等一個不會出現的訊號（最多 120 秒）。
+        let mut child = Command::new(r"C:\Windows\System32\waitfor.exe")
+            .args(["/t", "120", &format!("xlm{}", uuid::Uuid::new_v4().simple())])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn");
+        let game = profile::process_identity(child.id())
+            .expect("identity")
+            .expect("stand-in alive");
+
+        let result = require_window(game, Duration::from_millis(600)).await;
+        let exited = wait_with_timeout(&mut child, Duration::from_secs(5)).expect("wait");
+        if exited.is_none() {
+            // quality-allow: 斷言失敗前的善後
+            let _ = child.kill();
+        }
+
+        assert!(matches!(result, Err(AppError::GameWindowMissing { .. })));
+        assert!(exited.is_some(), "沒有視窗的遊戲應被結束");
     }
 
     /// 時間窗內一直在執行回 Ok；時間窗內結束回 `GameExitedEarly`。

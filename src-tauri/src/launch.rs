@@ -1,8 +1,9 @@
 //! 啟動編排：dirty 標記 →（國際服）閘道狀態 → 遊戲版本檢查 → 準備衛月 → 登入 → 啟動／注入 → 記錄佔用
 //! → 等這個遊戲結束時判定角色使用標記（`characters::usage::UsageWatch`）
 //! →（帳號勾了「ACT 跟這個帳號」時）寫 ACT 連動指令檔並等這個遊戲結束（結束時切回，見 `act_bridge::ActTargets`）
-//! →（同上，且該區服的 ACT 設定開啟時）開該區服的 ACT。遊戲開出就做後續步驟並回傳成功；是否提早結束（可能超過
-//! 客戶端實例上限）在背景觀察（[`EarlyExitWatch`]），觀察到時撤銷執行狀態並以 [`GAME_EXITED_EARLY_EVENT`] 通知前端。
+//! →（同上，且該區服的 ACT 設定開啟時）開該區服的 ACT。遊戲出現視窗就做後續步驟並回傳成功（沒出現視窗回錯，見
+//! `dalamud::launch_plain`）；是否提早結束（可能超過客戶端實例上限）在背景觀察（[`EarlyExitWatch`]），觀察到時
+//! 撤銷執行狀態並以 [`GAME_EXITED_EARLY_EVENT`] 通知前端。
 //! 登入前前端已先準備好衛月（`install_dalamud`）時沿用那次的結果（`dalamud::PreparedCache`），同一次登入不準備兩次。
 //!
 //! 遊戲版本檢查先於衛月相容 gate：goatcorp 會比對遊戲版本，綁 profile 而遊戲是舊版時
@@ -259,8 +260,8 @@ pub struct Launched {
     pub early_exit: EarlyExitWatch,
 }
 
-/// 遊戲開出後在背景觀察是否提早結束（`dalamud::watch_early_exit`，可能超過客戶端實例上限）。`launch_account`
-/// 不等它：遊戲一開出就記錄執行狀態、寫 ACT 連動、開 ACT 並回傳成功（實測觀察要 5 秒，遊戲視窗早就出現了）。
+/// 遊戲出現視窗後在背景觀察是否提早結束（`dalamud::watch_early_exit`，可能超過客戶端實例上限）。`launch_account`
+/// 不等它：遊戲一出現視窗就記錄執行狀態、寫 ACT 連動、開 ACT 並回傳成功（實測觀察要 5 秒，遊戲視窗約 2 秒就出現）。
 pub struct EarlyExitWatch {
     account_id: String,
     profile_id: Option<String>,
