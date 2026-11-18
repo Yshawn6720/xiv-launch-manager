@@ -67,8 +67,10 @@ pub enum AppError {
     #[error("找不到 {region} 版本檔 {path}，無法判斷是否需要更新；請先用 {region} 官方啟動器更新或修復")]
     VersionFileMissing { region: Region, path: String },
     /// 該安裝有套用途中中斷的遊戲更新（dirty 標記）；使用者修復後在本程式確認清除。
-    #[error("{region} 遊戲更新曾在套用途中中斷，遊戲檔可能不完整；請先用 {region} 官方啟動器修復，修復後在本程式確認清除更新標記")]
+    #[error("{region} 遊戲更新曾在套用途中中斷，遊戲檔可能不完整；請先用 {region} 官方啟動器修復，修復後在本程式確認清除更新標記。修復並在本程式確認之前，不要搬動或改名這個遊戲資料夾。")]
     PatchDirty { region: Region },
+    #[error("更新標記檔損壞，已停止啟動與更新。請先用官方啟動器修復或確認每一個曾用本程式更新、之後仍會使用的遊戲安裝；若不確定某個安裝的更新是否中斷過，請先修復它。全部確認完好後，才刪除「{path}」並重開本程式")]
+    PatchDirtyCorrupt { path: String },
     /// 目標安裝的遊戲或官方啟動器正在執行（protocols §3 例外的映像路徑比對）。
     #[error("遊戲或官方啟動器正在執行，請先關閉再更新")]
     GameRunning,
@@ -82,7 +84,7 @@ pub enum AppError {
     #[error("遊戲更新已中止（{reason}），請重新檢查更新後再試")]
     UpdateAborted { reason: String },
     /// 套用可能已寫入遊戲目錄後失敗：保留 dirty 標記，提示官方修復。
-    #[error("{region} 遊戲更新失敗（{reason}），遊戲檔可能不完整；請用 {region} 官方啟動器修復，修復後在本程式確認清除更新標記")]
+    #[error("{region} 遊戲更新失敗（{reason}），遊戲檔可能不完整；請用 {region} 官方啟動器修復，修復後在本程式確認清除更新標記。修復並在本程式確認之前，不要搬動或改名這個遊戲資料夾。")]
     UpdateBroken { region: Region, reason: String },
 
     #[error("尚未設定 {region} 遊戲路徑")]
@@ -131,11 +133,15 @@ pub enum AppError {
     /// 前端檢查之後才開始被使用時會走到這裡，再按一次登入就會問。
     #[error("Dalamud 設定檔「{profile}」正被另一個遊戲使用，尚未確認共用；請再按一次「登入」")]
     ProfileInUse { profile: String },
+    #[error("無法確認 Dalamud 設定檔是否正被使用；請先關閉所有由本程式開出的遊戲，再刪除「{path}」後重試，或本次改選「不載入 Dalamud」登入")]
+    ProfileUsageUnavailable { path: String },
     /// 沿用的舊啟動器資料夾已被另一個設定檔沿用。
     #[error("這個 Dalamud 資料夾已被設定檔「{profile}」沿用")]
     DataDirTaken { profile: String },
     #[error("仍有帳號使用這個 Dalamud 設定檔，請先讓這些帳號改用其他設定檔")]
     ProfileHasAccounts,
+    #[error("Dalamud 設定檔正被執行中的遊戲使用，請先關閉遊戲再刪除")]
+    DeleteProfileRunning,
     /// 複製時來源正被遊戲使用：衛月會持續寫入設定，複製到的可能是寫到一半的檔案。
     #[error("Dalamud 設定檔「{profile}」正被執行中的遊戲使用，請先關閉遊戲再複製")]
     DuplicateProfileRunning { profile: String },
@@ -178,6 +184,8 @@ pub enum AppError {
     /// 影子資料夾建立失敗（protocols §1.6「重建」）；reason 是給使用者的說明。
     #[error("無法建立影子資料夾（{reason}）")]
     ShadowBuild { reason: String },
+    #[error("影子資料夾「{root}」來歷不明，請將它移走或自行清理")]
+    ShadowRootUnowned { root: std::path::PathBuf },
 
     #[error("檔案操作失敗（{context}）：{message}")]
     Io { context: String, message: String },

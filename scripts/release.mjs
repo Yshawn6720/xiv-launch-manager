@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // 本機發布（流程與金鑰說明見 docs/release.md）：
 //   node scripts/release.mjs <version> [--notes <file>]   升版、打包、簽章安裝檔與免安裝 exe、產生 latest.json 到 release/v<version>/
-//   node scripts/release.mjs --dry-run [--notes <file>]   不檢查工作樹、不改版本，用目前版本打包驗證
+//   node scripts/release.mjs --dry-run [--notes <file>]   不檢查工作樹、不改版本，用目前版本打包驗證；產物在 release/dry-run/，不能拿去發布
 //   node scripts/release.mjs <version> --publish          不重新打包，把 release/v<version>/ 上傳成 GitHub Release
 // 只用 Node 內建模組；子程序一律 argv 陣列、不經 shell。
 import { execFileSync, spawnSync } from "node:child_process";
@@ -27,8 +27,8 @@ const NOTES_FILE = "notes.md";
 const MANIFEST = "latest.json";
 /** 授權與聲明檔，和安裝檔、免安裝 exe 一起上傳到 Release（免安裝版沒有安裝目錄可放）。 */
 const NOTICE_FILES = ["LICENSE", "NOTICE", "THIRD-PARTY-NOTICES.txt"];
-const SEMVER =
-  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+[0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*)?$/;
+/** 只接受 major.minor.patch：匯出與上傳都不支援預發版號（上傳不會標成 prerelease）與 +build。 */
+const SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 
 /** 本套件版本所在的位置：pattern 的三個群組＝前綴、版本、後綴；count＝檔內應有的處數。 */
 const VERSION_SITES = [
@@ -78,16 +78,15 @@ function parseArgs(argv) {
 
 /**
  * @param {string} version
- * @returns {{ core: number[]; pre: string[] }}
+ * @returns {number[]} major、minor、patch
  */
 function parseSemver(version) {
   const m = SEMVER.exec(version);
-  if (!m) fail(`版本 ${version} 不是 semver（例如 1.2.3，不加 v 前綴）`);
-  return { core: [Number(m[1]), Number(m[2]), Number(m[3])], pre: m[4] ? m[4].split(".") : [] };
+  if (!m) fail(`版本 ${version} 不是 major.minor.patch（例如 1.2.3，不加 v 前綴、不接預發版號或 +build）`);
+  return [Number(m[1]), Number(m[2]), Number(m[3])];
 }
 
 /**
- * semver 優先序（build metadata 不參與）。
  * @param {string} a
  * @param {string} b
  * @returns {number} 負數＝a 較舊
@@ -96,22 +95,9 @@ function compareSemver(a, b) {
   const x = parseSemver(a);
   const y = parseSemver(b);
   for (let i = 0; i < 3; i++) {
-    if (x.core[i] !== y.core[i]) return x.core[i] - y.core[i];
+    if (x[i] !== y[i]) return x[i] - y[i];
   }
-  // 沒有 pre-release 的版本比有的新。
-  if (x.pre.length === 0 || y.pre.length === 0) return Number(y.pre.length > 0) - Number(x.pre.length > 0);
-  const numeric = /^\d+$/;
-  for (let i = 0; i < Math.min(x.pre.length, y.pre.length); i++) {
-    const p = x.pre[i];
-    const q = y.pre[i];
-    if (p === q) continue;
-    const pn = numeric.test(p);
-    const qn = numeric.test(q);
-    if (pn && qn) return Number(p) - Number(q);
-    if (pn !== qn) return pn ? -1 : 1;
-    return p < q ? -1 : 1;
-  }
-  return x.pre.length - y.pre.length;
+  return 0;
 }
 
 /**
@@ -292,6 +278,7 @@ async function build(opts) {
   const current = conf.version;
   let version = current;
   if (opts.dryRun) {
+    console.log("release: 乾跑——產物輸出到 release/dry-run/，不能拿去發布（--publish 只讀 release/v<版本>/）");
     versionEdits(current, current); // 只核對各檔版本一致
     if (gitStatus()) console.warn("release: 乾跑——工作樹有未提交的變更，這次的產物不要拿去發布。");
   } else {
@@ -343,7 +330,8 @@ async function build(opts) {
   const signature = readFileSync(`${installer}.sig`, "utf8").trim();
   checkSignedVersion(await verifySignature(installer, signature, conf.pubkey), version);
 
-  const outDir = join(ROOT, "release", `v${version}`);
+  // 乾跑另用 release/dry-run/，不覆蓋同版本的正式產物，--publish 也讀不到它。
+  const outDir = join(ROOT, "release", opts.dryRun ? "dry-run" : `v${version}`);
   rmSync(outDir, { recursive: true, force: true });
   mkdirSync(outDir, { recursive: true });
   const setup = { asset: assetName(conf.productName, version, "setup"), signature };

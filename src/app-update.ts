@@ -33,8 +33,8 @@ const UPDATE_INSTALLING_TEXT = "正在安裝，完成後會自動重新開啟";
 let appUpdate: Update | null = null;
 /** 「更新至…」進行中：已下載／總位元組（伺服器沒給長度時為 null）；finished＝下載完並通過驗簽、交給安裝程式。 */
 let updating: { done: number; total: number | null; finished: boolean } | null = null;
-/** 上次更新失敗的原因：顯示在按鈕旁，按鈕改為「重試更新」；查到別的版本或重試時清掉。 */
-let updateError: string | null = null;
+/** 原因只顯示在訊息列；標題列只保留重試入口。 */
+let updateFailed = false;
 /** 進行中的檢查：背景與手動共用同一次，不重複連網。 */
 let updateCheck: Promise<Update | null> | null = null;
 /**
@@ -55,7 +55,6 @@ interface AppUpdateView {
   notesBody: HTMLElement;
   go: HTMLButtonElement;
   reason: HTMLElement;
-  error: HTMLElement;
   progress: HTMLElement;
   progressText: HTMLElement;
   progressBar: HTMLProgressElement;
@@ -64,7 +63,6 @@ interface AppUpdateView {
 /** 標題列右端、版本號右邊的更新入口：只建一次，之後就地更新，重繪不會收起展開中的更新說明。沒有「稍後」：不擋畫面，也就不必關。 */
 function appUpdateView(): AppUpdateView {
   const reason = h("span", { class: "app-update-note", id: "app-update-reason" });
-  const error = h("span", { class: "app-update-note error", id: "app-update-error" });
   const progressText = h("span");
   const progressBar = h("progress", { "aria-label": "下載更新" });
   const progress = h("div", { class: "app-update-progress" }, progressText, progressBar);
@@ -79,10 +77,9 @@ function appUpdateView(): AppUpdateView {
   });
   const go = h("button", { class: "primary app-update-go", type: "button" });
   go.addEventListener("click", startAppUpdate);
-  // 更新說明緊接版本號；停用原因、失敗訊息緊貼按鈕左邊；下載中進度取代按鈕的位置。
-  const root = h("div", { class: "app-update", role: "group", "aria-label": "程式更新" }, notes, reason, error, progress, go);
+  const root = h("div", { class: "app-update", role: "group", "aria-label": "程式更新" }, notes, reason, progress, go);
   root.hidden = true;
-  return { root, notes, notesBody, go, reason, error, progress, progressText, progressBar };
+  return { root, notes, notesBody, go, reason, progress, progressText, progressBar };
 }
 
 const appUpdateEntry = appUpdateView();
@@ -108,7 +105,6 @@ export function paintAppUpdate(): void {
   v.progress.hidden = updating === null;
   if (updating) {
     v.reason.hidden = true;
-    v.error.hidden = true;
     const { done, total, finished } = updating;
     if (finished) {
       v.progressText.textContent = UPDATE_INSTALLING_TEXT;
@@ -125,16 +121,10 @@ export function paintAppUpdate(): void {
   }
   const reason = updateBlockReason();
   v.go.disabled = reason !== null;
-  v.go.textContent = updateError ? "重試更新" : `更新至 ${appUpdate.version}`;
+  v.go.textContent = updateFailed ? "重試更新" : `更新至 ${appUpdate.version}`;
   v.reason.textContent = reason ?? "";
   v.reason.hidden = reason === null;
-  v.error.textContent = updateError ?? "";
-  // 錯誤訊息可能很長：標題列只顯示一行，完整內容在滑鼠停留說明與下方訊息列。
-  v.error.title = updateError ?? "";
-  v.error.hidden = updateError === null;
-  // 隱藏的元素仍會被 aria-describedby 念出，只關聯看得到的。
-  const describedBy = [reason === null ? "" : v.reason.id, updateError === null ? "" : v.error.id].filter(Boolean).join(" ");
-  if (describedBy) v.go.setAttribute("aria-describedby", describedBy);
+  if (reason !== null) v.go.setAttribute("aria-describedby", v.reason.id);
   else v.go.removeAttribute("aria-describedby");
 }
 
@@ -153,7 +143,7 @@ function setAppUpdate(next: Update | null): void {
   appUpdate = next;
   // 背景定期重查到同一版時不收起正在看的更新說明，也不清掉上次失敗的訊息。
   if (next?.version !== prev?.version) {
-    updateError = null;
+    updateFailed = false;
     appUpdateEntry.notes.open = false;
   }
   if (next) {
@@ -173,7 +163,7 @@ function startAppUpdate(): void {
     if (reason) throw new Error(`${reason}。`);
     const progress = { done: 0, total: null as number | null, finished: false };
     updating = progress;
-    updateError = null;
+    updateFailed = false;
     appUpdateEntry.notes.open = false;
     paintAppUpdate();
     try {
@@ -189,8 +179,8 @@ function startAppUpdate(): void {
       });
     } catch (e) {
       updating = null;
-      updateError = `更新失敗：${errorText(e)}`;
-      throw new Error(updateError);
+      updateFailed = true;
+      throw new Error(`更新失敗：${errorText(e)}`);
     }
     // 安裝版到不了這裡（安裝程式一啟動本程式就結束）；免安裝版在新版開始執行後回到這裡，本程式隨即結束。
     return UPDATE_INSTALLING_TEXT;
@@ -236,7 +226,7 @@ async function manualUpdateCheck(): Promise<void> {
     const next = await checkForUpdate();
     showVersionStatus(next ? `有新版本 ${next.version}` : "已是最新版", "ok", true);
   } catch (e) {
-    showVersionStatus("檢查失敗", "error", true);
+    showVersionStatus("", "", false);
     say(`檢查更新失敗：${errorText(e)}`, "error");
   }
 }

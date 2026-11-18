@@ -1,4 +1,25 @@
-import type { RunningGame } from "./api";
+import { DALAMUD_GAME_VERSION_MISMATCH_PREFIX, type Region, type RunningGame } from "./api.ts";
+
+/** 先讓國際服登入判斷遊戲是否需要更新；注入前仍會核對版本。 */
+export function canContinueAfterDalamudPrepareError(region: Region, message: string): boolean {
+  return region === "global" && message.startsWith(DALAMUD_GAME_VERSION_MISMATCH_PREFIX);
+}
+
+const earlyExits = new Map<number, string>();
+
+export function rememberEarlyExit(pid: number, message: string): void {
+  earlyExits.set(pid, message);
+}
+
+export function takeEarlyExit(pid: number): string | undefined {
+  const message = earlyExits.get(pid);
+  earlyExits.delete(pid);
+  return message;
+}
+
+export function clearEarlyExits(): void {
+  earlyExits.clear();
+}
 
 // 遊戲正常關閉沒有事件（只有提早結束會通知），畫面上的「執行中」只能靠輪詢結果撤銷。這裡只算要改什麼，不碰 DOM。
 

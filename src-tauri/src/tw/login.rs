@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
 use crate::game;
-use crate::patch::update::{self, RawPatchList, VersionCheck};
+use crate::patch::update::{self, RawPatchList, SubmittedVersions, VersionCheck};
 use crate::region::Region;
 
 const LOGIN_URL: &str = "https://user.ffxiv.com.tw/api/login/launcherLogin";
@@ -93,7 +93,7 @@ pub async fn login(
     otp: Option<&str>,
     recaptcha_token: &str,
 ) -> AppResult<VersionCheck<TwSession>> {
-    let (game_ver, version_body) = version_check_inputs(install)?;
+    let (versions, version_body) = version_check_inputs(install)?;
     let client = login_client()?;
 
     let email_hex = hex_encode(email);
@@ -110,7 +110,7 @@ pub async fn login(
     let login_token = accepted_value(status, response.error, response.token, "繁中服 launcherLogin")?;
 
     // 伺服器要求取 session 前先送版本檢查；需更新時不取 session。
-    if let VersionCheck::PatchList(list) = check_version_with(&client, &game_ver, version_body).await? {
+    if let VersionCheck::PatchList(list) = check_version_with(&client, versions, version_body).await? {
         return Ok(VersionCheck::PatchList(list));
     }
 
@@ -238,17 +238,17 @@ fn accepted_value(
 
 /// 不需登入的版本檢查（protocols §2.3），供啟動前與「檢查更新」使用。`ffxivgame.ver` 缺失時不送請求。
 pub async fn check_version(install: &Path) -> AppResult<VersionCheck<()>> {
-    let (game_ver, body) = version_check_inputs(install)?;
-    check_version_with(&http_client()?, &game_ver, body).await
+    let (versions, body) = version_check_inputs(install)?;
+    check_version_with(&http_client()?, versions, body).await
 }
 
 async fn check_version_with(
     client: &Client,
-    game_ver: &str,
+    versions: SubmittedVersions,
     body: String,
 ) -> AppResult<VersionCheck<()>> {
     let response = client
-        .post(format!("{VERSION_CHECK_URL}{game_ver}/"))
+        .post(format!("{VERSION_CHECK_URL}{}/", versions.game))
         .header("X-Hash-Check", "enabled")
         .body(body)
         .send()
@@ -271,20 +271,23 @@ async fn check_version_with(
     } else {
         Vec::new()
     };
-    classify_version_check(status, content_type, body)
+    classify_version_check(status, content_type, body, versions)
 }
 
 /// 版本檢查的 URL 版本與 body。`ffxivgame.ver` 缺失即 [`AppError::VersionFileMissing`]（不以基礎版本兜底
 /// 要清單）；body 開頭的 `\n` 代表不送 boot 版本，之後只列存在的資料片（§2.3）。
-fn version_check_inputs(install: &Path) -> AppResult<(String, String)> {
+fn version_check_inputs(install: &Path) -> AppResult<(SubmittedVersions, String)> {
     let game_ver = update::required_game_version(Region::Tw, install)?;
     let mut body = String::from("\n");
+    let mut expansions = Vec::with_capacity(usize::from(game::MAX_EXPANSION));
     for n in 1..=game::MAX_EXPANSION {
-        if let Some(ver) = game::expansion_version(install, n)? {
+        let version = game::expansion_version(install, n)?;
+        if let Some(ver) = &version {
             body.push_str(&format!("ex{n}\t{ver}\n"));
         }
+        expansions.push(version);
     }
-    Ok((game_ver, body))
+    Ok((SubmittedVersions { game: game_ver, expansions }, body))
 }
 
 /// 判定順序固定：204 → 非 2xx → 2xx 是否含 patch URL（protocols §2.3）。含 patch URL 時交回
@@ -293,6 +296,7 @@ fn classify_version_check(
     status: u16,
     content_type: String,
     body: Vec<u8>,
+    versions: SubmittedVersions,
 ) -> AppResult<VersionCheck<()>> {
     if status == 204 {
         return Ok(VersionCheck::UpToDate(()));
@@ -308,7 +312,7 @@ fn classify_version_check(
         body.windows(marker.len()).any(|w| w == marker)
     });
     if has_patch_url {
-        Ok(VersionCheck::PatchList(RawPatchList { content_type, body }))
+        Ok(VersionCheck::PatchList(RawPatchList { content_type, body, versions }))
     } else {
         Ok(VersionCheck::UpToDate(()))
     }
@@ -324,6 +328,11 @@ mod tests {
     use std::net::{TcpListener, TcpStream};
 
     use super::*;
+    use crate::patch::update::test_support::{OLD_VERSION, TwInstall};
+
+    fn submitted_versions() -> SubmittedVersions {
+        SubmittedVersions { game: OLD_VERSION.into(), expansions: vec![None; usize::from(game::MAX_EXPANSION)] }
+    }
 
     #[test]
     fn hex_encode_is_lowercase_utf8_hex() {
@@ -335,7 +344,7 @@ mod tests {
     }
 
     fn classify(status: u16, body: &[u8]) -> AppResult<VersionCheck<()>> {
-        classify_version_check(status, String::new(), body.to_vec())
+        classify_version_check(status, String::new(), body.to_vec(), submitted_versions())
     }
 
     #[test]
@@ -365,9 +374,13 @@ mod tests {
 
     #[test]
     fn version_check_2xx_with_patch_url_hands_back_list() {
-        let result =
-            classify_version_check(200, TW_CONTENT_TYPE.trim().to_string(), TW_BODY.to_vec())
-                .expect("list");
+        let result = classify_version_check(
+            200,
+            TW_CONTENT_TYPE.trim().to_string(),
+            TW_BODY.to_vec(),
+            submitted_versions(),
+        )
+        .expect("list");
         let VersionCheck::PatchList(list) = result else {
             panic!("應交回清單");
         };
@@ -385,9 +398,13 @@ mod tests {
         let body = std::str::from_utf8(TW_BODY)
             .expect("utf8")
             .replace("http://patch-dl.ffxiv.com.tw/", "https://patch-dl.ffxiv.com.tw/");
-        let result =
-            classify_version_check(200, TW_CONTENT_TYPE.trim().to_string(), body.clone().into_bytes())
-                .expect("list");
+        let result = classify_version_check(
+            200,
+            TW_CONTENT_TYPE.trim().to_string(),
+            body.clone().into_bytes(),
+            submitted_versions(),
+        )
+        .expect("list");
         let VersionCheck::PatchList(list) = result else {
             panic!("應交回清單");
         };
@@ -406,6 +423,18 @@ mod tests {
             classify(200, b"--477D80B1_2D6B_4E3A\r\n\r\n"),
             Ok(VersionCheck::UpToDate(()))
         ));
+    }
+
+    #[test]
+    fn version_check_inputs_record_versions_sent_and_absent_expansions() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fx = TwInstall::create(dir.path());
+        let (versions, body) = version_check_inputs(&fx.install).expect("inputs");
+        assert_eq!(versions.game, OLD_VERSION);
+        assert_eq!(body, format!("\nex1\t{OLD_VERSION}\n"));
+        let mut expected = vec![None; usize::from(game::MAX_EXPANSION)];
+        expected[0] = Some(OLD_VERSION.into());
+        assert_eq!(versions.expansions, expected);
     }
 
     #[tokio::test]

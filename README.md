@@ -157,7 +157,7 @@ https://github.com/user-attachments/assets/0739eb7f-e926-448f-aa6d-739a1c7e3e73
 
 從 0.2.1 起，遊戲執行中也能更新。正在登入或下載時不能更新，完成後再按即可。
 
-兩種版本都會自動更新，免安裝版更新時會替換自己。
+兩種版本都會自動更新，免安裝版更新時會替換自己。若免安裝版更新中斷、找不到原本的 exe，請將同一個資料夾裡的 `<原檔名>.old` 改回原檔名，或到 [Releases 頁面](https://github.com/Yshawn6720/xiv-launch-manager/releases/latest) 重新下載。
 
 ## 常見問題
 

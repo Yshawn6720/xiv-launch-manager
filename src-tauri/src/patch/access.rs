@@ -710,7 +710,7 @@ mod tests {
     }
 
     /// 手動：須在 UAC 開啟的系統管理員帳號，以「以系統管理員身分執行」的終端機跑
-    /// `node scripts/test.mjs access::tests::linked_token_reduction -- --ignored`。以真正的 linked token 縮減：
+    /// `node scripts/test.mjs access::tests::linked_token_reduction --ignored`。以真正的 linked token 縮減：
     /// 寫不進只給 Administrators 的資料夾，寫得進一般資料夾且新檔擁有者是使用者。
     #[test]
     #[ignore = "手動：需要 UAC 分割 token 的系統管理員身分"]

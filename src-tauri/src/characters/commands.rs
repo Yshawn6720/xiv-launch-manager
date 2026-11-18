@@ -72,7 +72,9 @@ pub async fn list_characters(state: State<'_, AppState>) -> AppResult<CharacterL
         let _guard = state.config_lock.lock().await;
         store::load_config(&state.paths)?
     };
-    let usage = characters::usage::load(&state.paths)?;
+    let usage = characters::usage::load(&state.paths)
+        .inspect_err(|_| eprintln!("無法讀取 character_usage.json，略過角色使用標記"))
+        .unwrap_or_default();
     let of_region = |region: Region| -> AppResult<RegionCharacters> {
         let dir = crate::game::config_dir(region)?;
         let names = config.characters.get(region);

@@ -86,7 +86,7 @@ export function secretView(
       unsavedNote.hidden = next !== "unsaved";
       unsavedText.textContent = text;
       const note = next === "replacing" ? replacingNote : next === "pending" ? pendingNote : next === "unsaved" ? unsavedNote : null;
-      const ids = [...errors.map((e) => e.id), ...(note ? [note.id] : [])];
+      const ids = [...errors.map((e) => e.id).filter(Boolean), ...(note ? [note.id] : [])];
       if (ids.length) input.setAttribute("aria-describedby", ids.join(" "));
       else input.removeAttribute("aria-describedby");
     },
@@ -104,13 +104,13 @@ interface OtpPreviewView {
 
 /**
  * 「自動產生」OTP 的預覽列：目前 OTP（三碼一組）與剩餘秒數，到期重新取碼，供與驗證器 App 比對。
- * source 回傳 null＝沒有金鑰可用。live region 只在碼或訊息變更時改字，秒數不在裡面、不會每秒念出。
+ * source 回傳 null＝沒有金鑰可用。只有狀態訊息是 live region，換碼與倒數不會自動播報。
  */
 export function otpPreview(source: () => { accountId: string | null; secret: string | null } | null): OtpPreviewView {
   const code = h("span", { class: "otp-preview-code" });
   const current = h("span", { class: "otp-preview-current" }, h("span", { class: "otp-preview-label" }, "目前 OTP"), code);
-  const message = h("span", { class: "otp-preview-message" });
-  const live = h("div", { class: "otp-preview-live", "aria-live": "polite", "aria-atomic": "true" }, current, message);
+  const message = h("span", { class: "otp-preview-message", "aria-live": "polite", "aria-atomic": "true" });
+  const live = h("div", { class: "otp-preview-live" }, current, message);
   const ring = h("span", { class: "otp-preview-ring", "aria-hidden": "true" });
   const left = h("span");
   // 畫面上的秒數環已表達「剩餘」，「剩」只留給輔助技術。

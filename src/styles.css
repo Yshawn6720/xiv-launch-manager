@@ -1,6 +1,6 @@
 /*
- * 視覺方向：現代工具風（Discord／Linear 類），偏藍紫的冷色調。表面由底往上：--bg（標題列、訊息列）→ --sidebar（帳號側欄）→
- * --surface（內容區；登入表單直接鋪在上面）→ --card（「擴充功能」「設定」的區塊卡片）；輸入框與凹槽（segmented、區服子分頁）
+ * 石板藍：冷灰底、低飽和藍主按鈕。表面由底往上：--bg（標題列、訊息列）→ --sidebar（帳號側欄）→
+ * --surface（內容區）→ --card（登入與設定卡片）；輸入框與凹槽（segmented、區服子分頁）
  * 用比卡片、內容區都暗的 --field，浮起的選中項、次要按鈕與選單用 --raised。各層在同一色相內只差一點明度，層次主要靠清楚的
  * --border（卡片外框、分隔線）與卡片陰影；卡片裡不再有「比卡片稍暗」的凹層：分段改用小標題與分隔線，巢狀卡片、設定列只畫外框。
  * 色票依 WCAG 2.1 AA 調過：文字（含 muted、accent、badge、頭像縮寫、error／success）對實際底色（含 hover、選中與 tint 疊色）≥ 4.5:1；
@@ -13,29 +13,29 @@
  */
 :root {
   color-scheme: light dark;
-  --fg: light-dark(#161a23, #edeff4);
-  --muted: light-dark(#525a68, #a2aab8);
+  --fg: light-dark(#172c40, #f2f6fb);
+  --muted: light-dark(#465b70, #b3c0cd);
   /* --accent：文字、指示條與 focus ring；--accent-solid：主按鈕、勾選框的底色（上面是白字） */
-  --accent: light-dark(#4338ca, #a5acff);
-  --accent-solid: #5865f2;
-  --accent-solid-hover: #4752c4;
+  --accent: light-dark(#2b6091, #91bee8);
+  --accent-solid: #386895;
+  --accent-solid-hover: #2b5078;
   --on-accent: #ffffff;
   /* 品牌方塊漸層的第二色（純裝飾） */
-  --brand-2: #8b5cf6;
-  --success: light-dark(#04603a, #4ade80);
+  --brand-2: #77a8d8;
+  --success: light-dark(#216448, #82d4ad);
   --error: light-dark(#b42318, #ff8f80);
   /* 表面，由底往上（同色相、小幅明度差）；輸入框比卡片暗一階 */
-  --bg: light-dark(#e5e8ee, #0f1115);
-  --sidebar: light-dark(#edeff4, #14161c);
-  --surface: light-dark(#f4f6f9, #1a1d25);
-  --card: light-dark(#ffffff, #22262f);
-  --field: light-dark(#f1f3f7, #13151b);
-  --raised: light-dark(#ffffff, #2e333e);
-  --border: light-dark(rgb(16 24 40 / 0.15), rgb(255 255 255 / 0.14));
-  --border-strong: light-dark(#7d8592, #6c7383);
-  --hover: light-dark(rgb(16 24 40 / 0.05), rgb(255 255 255 / 0.06));
-  --disabled-fg: light-dark(#757c89, #7c8494);
-  --disabled-bg: light-dark(#eceef2, #252932);
+  --bg: light-dark(#e3ebf3, #13191f);
+  --sidebar: light-dark(#e7edf3, #181f26);
+  --surface: light-dark(#edf2f6, #1e252d);
+  --card: light-dark(#ffffff, #242e38);
+  --field: light-dark(#f2f6fa, #161e26);
+  --raised: light-dark(#f7faff, #293542);
+  --border: light-dark(rgb(23 44 64 / 0.15), rgb(255 255 255 / 0.14));
+  --border-strong: light-dark(#71859a, #788b9d);
+  --hover: light-dark(rgb(23 44 64 / 0.05), rgb(255 255 255 / 0.06));
+  --disabled-fg: light-dark(#67798b, #889bad);
+  --disabled-bg: light-dark(#e6edf4, #29333e);
   /* 側欄帳號列的 hover／選中底色：不透明，頭像色點的外圈才能跟著同色 */
   --sidebar-hover: light-dark(
     color-mix(in srgb, var(--fg) 5%, var(--sidebar)),
@@ -310,9 +310,8 @@ button.app-version:hover:not(:disabled) {
   white-space: nowrap;
 }
 
-/* 狀態圓點：未執行用 muted，執行中 success（.status-dot 自帶），找不到執行檔 error；文字另有狀態，不只靠顏色。 */
-.running-act.muted::before,
-.running-act.warn::before {
+/* 狀態圓點：未執行用 muted，執行中用 success，找不到執行檔用 error；文字另有狀態。 */
+.running-act:is(.muted, .warn, .status-dot)::before {
   content: "";
   flex: none;
   width: 7px;
@@ -333,11 +332,11 @@ button.app-version:hover:not(:disabled) {
 .running-act.status-dot {
   border-color: color-mix(in srgb, var(--success) 40%, transparent);
   background: color-mix(in srgb, var(--success) 10%, var(--bg));
+  color: var(--success);
 }
 
 .running-act.status-dot::before {
-  width: 7px;
-  height: 7px;
+  background: currentColor;
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 25%, transparent);
 }
 
@@ -399,6 +398,11 @@ footer {
   border-left: 3px solid transparent;
   font-size: var(--text-sm);
   overflow-wrap: anywhere;
+  transition: opacity 240ms ease-out;
+}
+
+#message.is-fading {
+  opacity: 0;
 }
 
 /* 沒有訊息時整條訊息列收起不佔高度；#message（aria-live）仍留在 DOM 裡，有訊息就照常出現。 */
@@ -433,19 +437,9 @@ footer:has(> #message:empty) {
   min-width: 0;
 }
 
-/* 停用原因與失敗訊息：與按鈕同列的小字；失敗訊息只顯示一行，完整內容在訊息列。 */
 .app-update-note {
   color: var(--muted);
   font-size: var(--text-xs);
-}
-
-.app-update-note.error {
-  max-width: 36ch;
-  overflow: hidden;
-  color: var(--error);
-  font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 /* 與 nav 分頁同高，標題列不因按鈕出現而變高。 */
@@ -820,7 +814,7 @@ button.primary.app-update-go {
   text-align: center;
 }
 
-/* ---------- 登入分頁：全高側欄（帳號）＋內容區（登入表單直接鋪在內容區上） ---------- */
+/* ---------- 登入分頁：帳號側欄＋登入卡片與消息 ---------- */
 
 /* 登入分頁貼齊 main：不留外圍 padding，側欄與內容區各自捲動。 */
 main:has(> #tab-login:not([hidden])) {
@@ -835,7 +829,7 @@ main > #tab-login {
 
 .login-layout {
   display: grid;
-  grid-template-columns: 280px minmax(0, 1fr);
+  grid-template-columns: minmax(250px, 29%) minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
   height: 100%;
 }
@@ -854,6 +848,13 @@ main > #tab-login {
 
 .account-pane > .hint {
   padding: 0 var(--space-3);
+}
+
+.account-pane,
+.login-main,
+.news-body {
+  scrollbar-color: var(--border-strong) transparent;
+  scrollbar-width: thin;
 }
 
 /* 伺服器狀態（兩服各一）：有該服分組時接在分組標題右側，否則是清單頂端的一行；狀態是圓點＋文字，不只靠顏色。 */
@@ -928,10 +929,31 @@ main > #tab-login {
   padding: 0;
 }
 
-/*
- * 帳號列：整列是一個按鈕（頭像＋文字），點選切換右側表單的帳號。左緣貼著側欄邊的指示條：hover 露出短條、選中拉成長條（accent），
- * 頭像同時由圓形轉為圓角方形；只動 transform／border-radius。
- */
+.account-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-1);
+  padding-right: var(--space-2);
+  border-radius: var(--radius-sm);
+}
+
+.account-row:has(> [aria-current="true"]) {
+  background: var(--sidebar-selected);
+}
+
+.account-row:hover:not(:has(> [aria-current="true"])) {
+  background: var(--sidebar-hover);
+}
+
+button.secondary.account-login {
+  min-width: 64px;
+  padding-inline: var(--space-2);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+/* 選取與快速登入是並列的兩個按鈕；左緣指示目前帳號。 */
 .account-item {
   --avatar-ring: var(--sidebar);
   position: relative;
@@ -1079,35 +1101,12 @@ main > #tab-login {
   font-weight: 400;
 }
 
-/* 遊戲執行中：名稱旁的小綠點＋文字。 */
-.status-dot {
+.account-error-dot {
   flex: none;
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  color: var(--success);
-  font-size: var(--text-xs);
-  white-space: nowrap;
-}
-
-.status-dot::before {
-  content: "";
-  width: 6px;
-  height: 6px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
-  background: currentColor;
-}
-
-/* 密碼未儲存：名稱旁的小開鎖圖示（說明文字在 visually-hidden 與 title）。 */
-.account-item-flag {
-  flex: none;
-  display: inline-flex;
-  color: var(--muted);
-}
-
-.account-item-flag > .lock-icon {
-  width: 13px;
-  height: 13px;
+  background: var(--error);
 }
 
 /* 新增帳號：虛線圓圈的「＋」；hover／選中時填滿 accent、轉成圓角方形（同帳號頭像）。 */
@@ -1123,13 +1122,7 @@ main > #tab-login {
   color: var(--on-accent);
 }
 
-/*
- * 官方消息：接在帳號清單之後，跟著登入面板目前的區服（.global／.tw 決定 --region）。與帳號分組同一套版式：上方一條分隔線，
- * 標題列（CSS 畫的報紙圖示＋「國際服消息」／「繁中服消息」）同分組標題（小字、字距加寬），只有圖示與文字用區服色；每則不加底色，
- * 以細分隔線分開，hover 用側欄同一個 --sidebar-hover。標題 --fg、最多兩行、超出省略（完整標題在 title），日期小字 muted。
- * 文字都是 --fg／--muted 疊在 --sidebar／--sidebar-hover 上，與帳號列同一組對比；區服色標題在兩種主題都 ≥ 4.5:1（同 badge 字色）。
- * 側欄本身會捲動（.account-pane overflow-y），這一段不縮，帳號多時整欄一起捲動。
- */
+/* 消息跟隨目前區服，清單超過可見高度時獨立捲動。 */
 .news-group {
   flex: none;
   display: flex;
@@ -1185,6 +1178,11 @@ main > #tab-login {
   list-style: none;
 }
 
+.news-body {
+  max-height: 188px;
+  overflow: auto;
+}
+
 /* 則與則之間一條細線，取代每則各自的底色。 */
 .news-list > li + li {
   border-top: 1px solid var(--border);
@@ -1192,8 +1190,8 @@ main > #tab-login {
 
 .news-item {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  align-items: baseline;
+  gap: var(--space-3);
   width: 100%;
   min-width: 0;
   padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
@@ -1209,10 +1207,11 @@ main > #tab-login {
 }
 
 .news-item:hover:not(:disabled) {
-  background: var(--sidebar-hover);
+  background: var(--hover);
 }
 
 .news-item-title {
+  flex: 1;
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
@@ -1225,6 +1224,7 @@ main > #tab-login {
   color: var(--muted);
   font-size: var(--text-xs);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 /* 載入中、取不到（可點擊重試）、沒有消息：一行 muted 小字，左緣與標題對齊。 */
@@ -1250,10 +1250,6 @@ button.news-retry:hover:not(:disabled) {
   text-underline-offset: 3px;
 }
 
-/*
- * 右側內容區：自己捲動。登入表單不另成卡片，直接鋪在內容區上、靠左填滿；寬視窗時表單最寬 960px，欄位不拉到難讀的寬度
- * （同「擴充功能」「設定」的內容靠左、限制寬度）。預設視窗（960×680）的已存帳號收起「進階」時不必捲動。
- */
 .login-main {
   min-width: 0;
   overflow-y: auto;
@@ -1261,11 +1257,96 @@ button.news-retry:hover:not(:disabled) {
   background: var(--surface);
 }
 
+.login-panel,
+.news-group {
+  max-width: var(--content-w);
+  margin-inline: auto;
+}
+
 .login-panel {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
-  max-width: 960px;
+}
+
+.signin-panel {
+  padding: var(--space-5);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--card);
+  box-shadow: var(--shadow-1);
+}
+
+.signin-panel .login-head {
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding-bottom: var(--space-4);
+}
+
+.signin-panel .avatar {
+  width: 42px;
+  height: 42px;
+}
+
+.login-account-meta {
+  flex-basis: 100%;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+
+.signin-credentials > .login-field {
+  flex-basis: 140px;
+}
+
+.login-error-box {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid color-mix(in srgb, var(--error) 35%, transparent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--error) 8%, transparent);
+}
+
+button.ghost.login-error-close {
+  flex: none;
+  font-size: var(--text-xl);
+  line-height: 1;
+}
+
+.signin-panel progress {
+  appearance: none;
+  height: 8px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 999px;
+  background: var(--field);
+}
+
+.signin-panel progress::-webkit-progress-bar {
+  background: var(--field);
+}
+
+.signin-panel progress::-webkit-progress-value {
+  background: var(--accent-solid);
+}
+
+.signin-panel progress:indeterminate {
+  background-image: linear-gradient(90deg, transparent, var(--accent-solid), transparent);
+  background-size: 40% 100%;
+  background-repeat: no-repeat;
+  animation: login-progress 1.5s ease-in-out infinite alternate;
+}
+
+.signin-panel progress:indeterminate::-webkit-progress-bar {
+  background: transparent;
+}
+
+@keyframes login-progress {
+  from { background-position: 0 0; }
+  to { background-position: 100% 0; }
 }
 
 /*
@@ -1319,7 +1400,7 @@ button.news-retry:hover:not(:disabled) {
     linear-gradient(currentColor 0 0) 4.75px 5px / 3.5px 1.5px no-repeat;
 }
 
-/* 側欄消息標題列的「水晶商城」：secondary 的形狀，改用區服色（.news-group 的 --region）的字、框與淡底，一眼可見；圖示是區服色的菱形水晶。 */
+/* 消息標題列的商城按鈕使用區服色。 */
 button.secondary.shop-button {
   flex: none;
   border-color: color-mix(in srgb, var(--region) 55%, transparent);
@@ -1343,7 +1424,7 @@ button.secondary.shop-button:hover:not(:disabled) {
   transform: rotate(45deg);
 }
 
-/* 名稱（或重新命名的輸入框）與 badge 同一行、基線對齊；佔滿頁首剩下的寬度，「⋯」靠右。 */
+/* 名稱與 badge 基線對齊；佔滿頁首剩下的寬度。 */
 .login-identity {
   flex: 1 1 auto;
   min-width: 0;
@@ -1361,16 +1442,6 @@ button.secondary.shop-button:hover:not(:disabled) {
   letter-spacing: -0.01em;
   line-height: 1.25;
   overflow-wrap: anywhere;
-}
-
-/* 就地重新命名：與標題同字級的輸入框。 */
-input.login-title-input {
-  width: min(100%, 18em);
-  min-height: 0;
-  padding: 0 var(--space-2);
-  font-size: var(--text-2xl);
-  font-weight: 700;
-  line-height: 1.3;
 }
 
 input.card-title-input {
@@ -1844,10 +1915,7 @@ fieldset.login-fields {
   align-items: flex-start;
 }
 
-/*
- * 「登入」列：表單的底部，上方細分隔線。由上而下：錯誤、遊戲更新提示與進度（含完整性檢查的進度與結果）、
- * 按鈕（登入＋僅儲存）、登入進度。#patch-status 不成框（display: contents），子元素直接排進這一欄，沒有內容時不佔間距。
- */
+/* 編輯帳號的儲存區與表單分開；patch-status 不佔自己的版面空間。 */
 .login-submit-bar {
   display: flex;
   flex-direction: column;
@@ -1866,7 +1934,7 @@ fieldset.login-fields {
   gap: var(--space-2);
 }
 
-/* 「登入」「僅儲存」44px；選擇器要比 button.primary／secondary 具體，否則被後面的通用高度蓋回 --control-h。 */
+/* 主面板操作 44px；覆蓋通用高度 --control-h。 */
 .login-buttons > button.primary,
 .login-buttons > button.secondary {
   min-height: 44px;
@@ -2626,14 +2694,6 @@ dialog p {
   font-size: var(--text-sm);
 }
 
-dialog input {
-  width: 100%;
-  min-height: var(--control-h-lg);
-  font-size: var(--text-xl);
-  letter-spacing: 0.2em;
-  text-align: center;
-}
-
 dialog .actions {
   display: flex;
   justify-content: flex-end;
@@ -2911,25 +2971,56 @@ button.secondary:disabled {
 
 /* ---------- 窄視窗 ---------- */
 
-/* 登入分頁上下堆疊：側欄改到頂部全寬，內容區在下；帳號、密碼退回上下排。 */
+/* 窄視窗全頁一起捲，不把帳號和登入卡片關在兩個小捲動區。 */
 @media (max-width: 760px) {
+  main:has(> #tab-login:not([hidden])) {
+    overflow: auto;
+  }
+
+  main > #tab-login,
+  .login-layout {
+    height: auto;
+  }
+
   .login-layout {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-rows: auto auto;
   }
 
   .account-pane {
-    max-height: 40vh;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
+    gap: var(--space-2);
+    overflow: visible;
     border-right: none;
     border-bottom: 1px solid var(--border);
   }
 
-  .login-credentials {
-    flex-direction: column;
+  .account-pane > :not(.account-group) {
+    grid-column: 1 / -1;
   }
 
-  .login-credentials > .login-field {
-    flex: none;
+  .login-main {
+    overflow: visible;
+  }
+
+  .account-group {
+    margin-top: 0;
+  }
+
+  .account-item {
+    min-height: 42px;
+  }
+
+  .account-item.account-add {
+    margin-top: var(--space-1);
+  }
+}
+
+@media (max-width: 520px) {
+  .account-pane {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 

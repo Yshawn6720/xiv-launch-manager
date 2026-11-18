@@ -16,16 +16,17 @@ import { installing, installProgress } from "./dalamud";
 import { renderExtensions } from "./extensions";
 import { autoCheckTwGameUpdate, setPatchState } from "./game-update";
 import {
-  flagExitedEarly,
   focusLoginStart,
   paintLaunchProgress,
   refreshServerStatus,
   remember,
   renderLogin,
+  showsLoginFailure,
   stopOtpPreview,
 } from "./login";
 import { paintProgress, progressState } from "./progress";
 import { paintRunningStatus, refreshRunningStatus } from "./running-status";
+import { rememberEarlyExit } from "./running-sync";
 import { renderSettings } from "./settings";
 
 // ---------- 主流程 ----------
@@ -137,16 +138,14 @@ void listen<ProgressPayload>(PROGRESS_EVENT, (event) => {
   // 其他事件（例如取消後晚到的）已沒有對應的畫面，略過。
 });
 
-// 登入已回成功、背景觀察到遊戲提早結束：後端已撤銷執行狀態並叫回視窗。訊息與同步回錯相同，記在該帳號的「上次」、
-// 訊息列，正看著該帳號時也標在表單上。
+// 後端已撤銷執行狀態並叫回視窗；同一則失敗只在登入面板或訊息列顯示。
 void listen<GameExitedEarlyPayload>(GAME_EXITED_EARLY_EVENT, (event) => {
-  const { accountId, message: text } = event.payload;
+  const { accountId, pid, message: text } = event.payload;
+  rememberEarlyExit(pid, text);
   remember(accountId, text, false);
-  say(text, "error");
   refreshRunningStatus();
-  // 有進行中的動作時不重繪（會換掉 run() 鎖住的按鈕），表單也不標（那時看的可能是別的帳號）；動作結束的重繪會畫出「上次」。
   if (runsActive > 0) return;
-  flagExitedEarly(accountId, text);
+  if (!showsLoginFailure(accountId)) say(text, "error");
   renderLogin();
 });
 

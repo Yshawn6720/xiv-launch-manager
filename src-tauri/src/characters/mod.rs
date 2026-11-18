@@ -311,7 +311,7 @@ fn apply(game_dir: &Path, backups_dir: &Path, id: &str, writes: &[FileWrite]) ->
         }
     }
     if let Err(e) = prune_auto(backups_dir, id, &auto) {
-        // 寫入已成功；裁剪失敗只多留幾份舊備份，下次成功時再裁。
+        // 寫入已成功；裁剪失敗可能留下完整的舊備份或未列出的暫存資料夾。
         eprintln!("裁剪角色 {id} 的自動備份失敗：{e}");
     }
     Ok(auto)
@@ -368,7 +368,10 @@ fn prune_auto(backups_dir: &Path, id: &str, current: &str) -> io::Result<()> {
     let list = backups(backups_dir, id).map_err(|e| io::Error::other(e.to_string()))?;
     let dir = backups_of(backups_dir, id);
     for old in list.iter().filter(|b| b.kind == BackupKind::Auto && b.id != current).skip(AUTO_KEEP - 1) {
-        fs::remove_dir_all(dir.join(&old.id))?;
+        // 先讓備份退出清單；遞迴刪除中斷時，不會把殘檔列為可還原備份。
+        let staging = dir.join(format!(".{}{TEMP_SUFFIX}", uuid::Uuid::new_v4().simple()));
+        store::rename_dir_write_through(&dir.join(&old.id), &staging)?;
+        fs::remove_dir_all(&staging)?;
     }
     Ok(())
 }

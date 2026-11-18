@@ -385,6 +385,17 @@ pub fn create_protected_dir(path: &Path) -> io::Result<()> {
     created
 }
 
+fn check_rebuild_root(root: &Path) -> AppResult<bool> {
+    if fs::symlink_metadata(root.join(SOURCE_FILE)).is_ok_and(|m| m.file_attributes() & NOT_PLAIN == 0) {
+        return Ok(true);
+    }
+    match fs::read_dir(root) {
+        Ok(mut entries) => entries.next().map_or(Ok(false), |_| Err(AppError::ShadowRootUnowned { root: root.into() })),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(read_dir_error(root)(e)),
+    }
+}
+
 /// 刪掉整個影子再依 `plan`（[`plan`] 的結果）重建，最後寫 `source`；呼叫端須先確認遊戲沒有在執行。影子根目錄
 /// 以 `create_root` 建立（提權 helper 傳 [`create_protected_dir`]，程式內重建傳 `fs::create_dir`），裡面的資料夾
 /// 照常建立、繼承根目錄的權限。`plan` 由呼叫端先算：讀不到安裝資料夾時還沒動到影子（helper 回 10，不是 20）。
@@ -394,7 +405,9 @@ pub(crate) fn build(
     plan: &[Entry],
     create_root: impl FnOnce(&Path) -> io::Result<()>,
 ) -> AppResult<()> {
-    match fs::remove_dir_all(root) {
+    // 沒有來源記號時只准刪空資料夾，即使檢查後有人放入檔案也不會刪掉。
+    let removed = if check_rebuild_root(root)? { fs::remove_dir_all(root) } else { fs::remove_dir(root) };
+    match removed {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => return Err(AppError::io("刪除舊的影子資料夾", e)),
@@ -531,7 +544,7 @@ fn helper_blocker(root: &Path, install: &Path, detected: Option<PathBuf>) -> Opt
 /// 影子裡建好之後才出現的項目（protocols §1.6「重建」）：影子根目錄與 `game`、`game\sqpack`、`game\sqpack\ffxiv`
 /// 裡建立時間晚於 `source` 的檔案或資料夾，連結不算（刪除只刪連結本身）。hardlink 的建立時間是來源檔的，一定
 /// 不晚於 `source`；晚於的是工具或使用者放進去的（例如寫在遊戲執行檔旁的截圖），重建會把它們一起刪掉。沒有
-/// `source`（沒建過或沒建完）時無從判定，回空。
+/// `source` 時無從判定，回空；來源判定由 [`check_rebuild_root`] 負責。
 fn added_after_build(root: &Path) -> AppResult<Vec<PathBuf>> {
     let source_error = |e| AppError::io("讀取影子資料夾來源", e);
     let built = match fs::symlink_metadata(root.join(SOURCE_FILE)) {
@@ -656,6 +669,9 @@ pub fn launch_exe(
         };
     }
     if !is_fresh(&root, install, &pack) {
+        if let Err(e) = check_rebuild_root(&root) {
+            return fallback(format!("外部包沒有套用（{e}）"));
+        }
         match added_after_build(&root) {
             Ok(added) if added.is_empty() => {}
             Ok(added) => return fallback(added_warning(&added)),
@@ -1011,6 +1027,46 @@ mod tests {
         assert_eq!(missing.exe, original);
         assert!(missing.warning.is_some());
         assert_eq!(rebuilds.get(), 1);
+    }
+
+    #[test]
+    fn built_shadow_without_source_keeps_player_files() {
+        let f = Fixture::new();
+        f.build();
+        let root = f.root();
+        fs::remove_file(root.join(SOURCE_FILE)).expect("remove source");
+        let player_file = root.join(r"game\notes.txt");
+        write(&player_file, b"player data");
+        let install = f.install();
+        let plan = plan(&install, &f.read_pack()).expect("plan");
+        let err = build(&root, &install, &plan, |dir| fs::create_dir(dir)).expect_err("影子缺少 source 時不重建");
+        assert!(err.to_string().contains(&root.display().to_string()), "{err}");
+        assert_eq!(fs::read(player_file).expect("保留玩家檔案"), b"player data");
+    }
+
+    #[test]
+    fn foreign_nonempty_root_is_not_rebuilt() {
+        let f = Fixture::new();
+        let root = f.root();
+        let player_file = root.join("notes.txt");
+        write(&player_file, b"player data");
+        let install = f.install();
+        let plan = plan(&install, &f.read_pack()).expect("plan");
+        let err = build(&root, &install, &plan, |dir| fs::create_dir(dir)).expect_err("同名的玩家資料夾不重建");
+        assert!(err.to_string().contains(&root.display().to_string()), "{err}");
+        assert_eq!(fs::read(player_file).expect("保留玩家檔案"), b"player data");
+
+        let launch = launch_exe(&f.settings(), &install, |_, _| panic!("來歷不明時不呼叫重建"));
+        assert_eq!(launch.exe, crate::game::game_exe(&install));
+        assert!(launch.warning.expect("原版啟動提示").contains(&root.display().to_string()));
+    }
+
+    #[test]
+    fn empty_shadow_root_can_be_built() {
+        let f = Fixture::new();
+        fs::create_dir(f.root()).expect("mkdir");
+        f.build();
+        assert!(f.fresh());
     }
 
     /// 影子裡建好之後才放進去的檔案（例如工具寫在遊戲執行檔旁的截圖）：不重建（重建會連它一起刪掉），用原執行檔

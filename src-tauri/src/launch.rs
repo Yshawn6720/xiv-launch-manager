@@ -66,6 +66,7 @@ pub struct LaunchOptions {
 pub struct LaunchOutcome {
     pub pid: u32,
     pub dalamud_version: Option<String>,
+    pub profile_usage_warning: Option<String>,
     /// 遊戲已啟動，但「登入遊戲後自動開啟 ACT」沒能開起 ACT 的原因；沒開或已開起為 `None`。
     pub act_warning: Option<String>,
     /// 遊戲已啟動，但 ACT 連動指令檔（protocols §6.2）沒寫成的原因；寫成為 `None`。
@@ -89,13 +90,15 @@ struct ProgressPayload<'a> {
 #[serde(rename_all = "camelCase")]
 struct GameExitedEarlyPayload<'a> {
     account_id: &'a str,
+    pid: u32,
     message: String,
 }
 
 /// 送 [`GAME_EXITED_EARLY_EVENT`]。
-pub fn emit_exited_early(app: &AppHandle, account_id: &str, error: &AppError) {
+pub fn emit_exited_early(app: &AppHandle, account_id: &str, pid: u32, error: &AppError) {
     let payload = GameExitedEarlyPayload {
         account_id,
+        pid,
         message: error.to_string(),
     };
     // 送不出去只少一則畫面通知：紀錄已撤銷，header 的輪詢照樣會更新。背景沒有畫面可回報，只記 log。
@@ -281,10 +284,10 @@ impl EarlyExitWatch {
     }
 
     /// 等觀察結束。遊戲提早結束時撤銷這次啟動寫入的佔用與帳號執行紀錄（同步回錯時兩者都不會寫），再以
-    /// `on_exit(帳號 id, 錯誤)` 通知，錯誤與同步回錯時相同。呼叫端在啟動的後續步驟（含收起視窗）都做完後才呼叫，
+    /// `on_exit(帳號 id, pid, 錯誤)` 通知，錯誤與同步回錯時相同。呼叫端在啟動的後續步驟（含收起視窗）都做完後才呼叫，
     /// 撤銷與通知一定在那之後。ACT 連動指令檔由 `ActTargets` 原本就在等的遊戲結束切回；已開起的 ACT 不關
     /// （protocols §3：不結束 ACT 程序）。
-    pub async fn finish(self, paths: &AppPaths, on_exit: impl FnOnce(&str, &AppError)) {
+    pub async fn finish(self, paths: &AppPaths, on_exit: impl FnOnce(&str, u32, &AppError)) {
         let Self {
             account_id,
             profile_id,
@@ -298,7 +301,7 @@ impl EarlyExitWatch {
         });
         if let Err(e) = watched {
             revoke_running(paths, &account_id, profile_id.as_deref(), &process);
-            on_exit(&account_id, &e);
+            on_exit(&account_id, process.pid, &e);
         }
     }
 }
@@ -342,8 +345,9 @@ pub async fn launch_account(
             if profile.region() != region {
                 return Err(AppError::ProfileRegionMismatch);
             }
-            // 共用前要先確認（protocols §3）；前端在登入前已問過，這裡再核對一次。
-            if !profile.share_confirmed && dalamud::profile_in_use(paths, &profile.id)? {
+            // 即使已確認共用，佔用紀錄讀不到也不能放行。
+            let in_use = dalamud::profile_in_use(paths, &profile.id)?;
+            if !profile.share_confirmed && in_use {
                 return Err(AppError::ProfileInUse {
                     profile: profile.name.clone(),
                 });
@@ -357,11 +361,6 @@ pub async fn launch_account(
         secrets::load(&account.id, SecretKind::Password)
     })?;
     let otp = resolve_otp(&account, options.otp.as_deref())?;
-    // 國際服照舊在這裡產生 OTP；繁中服等登入確認對話框交回 token 才產生（token_then_otp）。
-    let global_otp = match region {
-        Region::Global => otp.code(None, totp::now())?,
-        Region::Tw => None,
-    };
 
     if region == Region::Global {
         emit_stage(app, account_id, "檢查國際服伺服器狀態");
@@ -392,9 +391,8 @@ pub async fn launch_account(
                 Some(Ok(l)) => l,
                 _ => &fallback,
             };
-            let checked =
-                global::login(login_lease, &install, &account.username, &password, global_otp.as_deref())
-                    .await?;
+            let get_code = (!matches!(&otp, OtpSource::None)).then_some(|| otp.code(None, totp::now()));
+            let checked = global::login(login_lease, &install, &account.username, &password, get_code).await?;
             let session = update::require_up_to_date(pending, region, &install, checked)?;
             // 衛月 Lease 判定放在版本檢查之後：goatcorp 停用衛月或取不到 Lease 時仍要能走到遊戲更新
             // （驗收「綁 profile＋舊遊戲時能走到更新」）。取不到 Lease 同樣不注入（fail closed）。
@@ -457,7 +455,7 @@ pub async fn launch_account(
     };
 
     emit_stage(app, account_id, "啟動遊戲");
-    let (process, dalamud_version) = match (&profile, prepared) {
+    let (process, dalamud_version, profile_usage_warning) = match (&profile, prepared) {
         (Some(p), Some(prepared)) => {
             let profile_paths = dalamud::ensure_profile_paths(paths, p)?;
             let language = match region {
@@ -477,10 +475,10 @@ pub async fn launch_account(
                 plugins: options.plugins,
             };
             let process = dalamud::launch_with_dalamud(&request).await?;
-            dalamud::mark_running(paths, &p.id, &process)?;
-            (process, Some(prepared.version))
+            let warning = dalamud::mark_running_or_warn(paths, &p.id, &process);
+            (process, Some(prepared.version), warning)
         }
-        _ => (dalamud::launch_plain(&game_exe, &game_args).await?, None),
+        _ => (dalamud::launch_plain(&game_exe, &game_args).await?, None, None),
     };
     let early_exit = EarlyExitWatch::start(account_id, profile.as_ref().map(|p| p.id.clone()), process);
     // 帳號執行紀錄只供畫面顯示；遊戲已經開起來，寫失敗不能回報成啟動失敗（使用者會重試、開出第二個遊戲）。
@@ -512,6 +510,7 @@ pub async fn launch_account(
         outcome: LaunchOutcome {
             pid: process.pid,
             dalamud_version,
+            profile_usage_warning,
             act_warning,
             act_target_warning,
             pack_warning,
@@ -794,10 +793,10 @@ mod tests {
         child.wait().expect("reap");
         let mut notified = None;
         watch
-            .finish(&paths, |account_id, e| notified = Some((account_id.to_string(), e.to_string())))
+            .finish(&paths, |account_id, pid, e| notified = Some((account_id.to_string(), pid, e.to_string())))
             .await;
 
-        assert_eq!(notified, Some(("a1".to_string(), AppError::GameExitedEarly.to_string())));
+        assert_eq!(notified, Some(("a1".to_string(), game.pid, AppError::GameExitedEarly.to_string())));
         assert_eq!(profile_records(&paths).into_keys().collect::<Vec<_>>(), ["p2"]);
         let accounts = dalamud::account_processes(&paths).expect("accounts");
         assert_eq!(accounts.into_keys().collect::<Vec<_>>(), ["a2"]);
@@ -819,7 +818,7 @@ mod tests {
             process: game,
             watch: tokio::spawn(async { Ok(()) }),
         };
-        watch.finish(&paths, |_, e| panic!("不應通知：{e}")).await;
+        watch.finish(&paths, |_, _, e| panic!("不應通知：{e}")).await;
 
         assert_eq!(profile_records(&paths)["p1"], [game]);
         assert_eq!(dalamud::running_accounts(&paths).expect("accounts"), ["a1"]);

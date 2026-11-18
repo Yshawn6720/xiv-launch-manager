@@ -77,18 +77,27 @@ export function section(id: string): HTMLElement {
 }
 
 const message = document.getElementById("message") as HTMLDivElement;
-export const otpDialog = document.getElementById("otp-dialog") as HTMLDialogElement;
-export const otpDialogTitle = document.getElementById("otp-dialog-title") as HTMLHeadingElement;
-export const otpInput = document.getElementById("otp-input") as HTMLInputElement;
+const MESSAGE_DURATION_MS = 6000;
+const MESSAGE_FADE_MS = 240;
+let messageTimer: number | undefined;
+let lastMessage = "";
 
 export function say(text: string, kind: "ok" | "error" | "" = ""): void {
+  window.clearTimeout(messageTimer);
+  lastMessage = text;
   message.textContent = text;
   message.className = kind;
+  if (text) {
+    messageTimer = window.setTimeout(() => {
+      message.classList.add("is-fading");
+      messageTimer = window.setTimeout(() => (message.textContent = ""), MESSAGE_FADE_MS);
+    }, MESSAGE_DURATION_MS);
+  }
 }
 
-/** 訊息列目前的文字。 */
+/** 最近發出的訊息；淡出後仍保留，讓遊戲結束能接續對應的啟動通知。 */
 export function shownMessage(): string {
-  return message.textContent ?? "";
+  return lastMessage;
 }
 
 export function errorText(e: unknown): string {
@@ -96,7 +105,7 @@ export function errorText(e: unknown): string {
 }
 
 /** 動作完成時的訊息：字串為成功樣式；完成但結果不是成功（例如檢查發現問題）時指定樣式。 */
-type RunResult = string | { text: string; kind: "ok" | "error" | "" };
+export type RunResult = string | { text: string; kind: "ok" | "error" | "" } | null;
 
 /** 進行中的 run() 數；背景動作（例如台服遊戲更新自動檢查）據此避開正在鎖住面板的動作。 */
 export let runsActive = 0;
@@ -111,8 +120,9 @@ export async function run(label: string, action: () => Promise<RunResult | void>
   locked.forEach((c) => (c.disabled = true));
   say(`${label}…`);
   try {
-    const done = (await action()) ?? `${label}完成`;
-    if (typeof done === "string") say(done, "ok");
+    const done = await action();
+    if (done === null) say("");
+    else if (typeof done === "string" || done === undefined) say(done ?? `${label}完成`, "ok");
     else say(done.text, done.kind);
   } catch (e) {
     const text = errorText(e);

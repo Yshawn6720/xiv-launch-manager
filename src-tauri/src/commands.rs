@@ -90,14 +90,18 @@ pub async fn get_config(state: State<'_, AppState>) -> AppResult<ConfigView> {
             account,
         });
     }
-    let in_use = dalamud::profiles_in_use(&state.paths)?;
+    let in_use = dalamud::profiles_in_use(&state.paths)
+        .inspect_err(|e| eprintln!("{e}"))
+        .unwrap_or_default();
     let profiles_in_use = config
         .profiles
         .iter()
         .filter(|p| in_use.contains(&p.id))
         .map(|p| p.id.clone())
         .collect();
-    let installed = dalamud::list_installed(&state.paths)?;
+    let installed = dalamud::list_installed(&state.paths)
+        .inspect_err(|e| eprintln!("無法列出已安裝的 Dalamud：{e}"))
+        .unwrap_or_default();
     let profile_info = config
         .profiles
         .iter()
@@ -110,7 +114,9 @@ pub async fn get_config(state: State<'_, AppState>) -> AppResult<ConfigView> {
         profiles_in_use,
         profile_info,
         installed,
-        accounts_running: dalamud::running_accounts(&state.paths)?,
+        accounts_running: dalamud::running_accounts(&state.paths)
+            .inspect_err(|e| eprintln!("無法讀取帳號執行紀錄：{e}"))
+            .unwrap_or_default(),
         data_dir: state.paths.root().display().to_string(),
         ui: config.ui,
         external_pack: config.external_pack,
@@ -681,6 +687,10 @@ fn check_data_dir(
 /// 只移除設定，profile 資料夾（插件與設定）保留，避免誤刪使用者資料。
 #[tauri::command]
 pub async fn delete_profile(state: State<'_, AppState>, id: String) -> AppResult<()> {
+    let _guard = state.launch_lock.lock().await;
+    if dalamud::profile_in_use(&state.paths, &id)? {
+        return Err(AppError::DeleteProfileRunning);
+    }
     update_config(&state, |c| {
         if c.accounts.iter().any(|a| a.profile_id.as_deref() == Some(id.as_str())) {
             return Err(AppError::ProfileHasAccounts);
@@ -836,8 +846,9 @@ pub async fn install_dalamud(
     version: Option<YanmucorpVersion>,
     version_check: dalamud::GameVersionCheck,
 ) -> AppResult<String> {
-    let channel = install_channel(region, version)?;
     let _guard = state.launch_lock.lock().await;
+    state.prepared_dalamud.clear();
+    let channel = install_channel(region, version)?;
     let cancel = state.download_cancel.token();
     let config = store::load_config(&state.paths)?;
     let install = config
@@ -934,8 +945,8 @@ pub async fn launch_account(
     let (app, paths, window) = (app.clone(), state.paths.clone(), main_window.inner().clone());
     tokio::spawn(async move {
         early_exit
-            .finish(&paths, |account_id, e| {
-                launch::emit_exited_early(&app, account_id, e);
+            .finish(&paths, |account_id, pid, e| {
+                launch::emit_exited_early(&app, account_id, pid, e);
                 window.restore(&app);
             })
             .await;

@@ -8,7 +8,7 @@ import {
   type Region,
 } from "./api";
 import { config, h, run, runsActive } from "./app";
-import { draft, loginMenu, renderLogin } from "./login";
+import { draft, launching, loginMenu, renderLogin } from "./login";
 import {
   MB,
   paintProgress,
@@ -133,7 +133,7 @@ let twAutoChecking = false;
  */
 export function autoCheckTwGameUpdate(): void {
   // 啟動時讀設定失敗的話 config 還沒有值。
-  if (((config as ConfigView | undefined)?.games.tw ?? null) === null || twAutoChecking || runsActive > 0) return;
+  if (((config as ConfigView | undefined)?.games.tw ?? null) === null || twAutoChecking || launching || runsActive > 0) return;
   if (twAutoCheckedAt !== null && Date.now() - twAutoCheckedAt < TW_AUTO_CHECK_INTERVAL_MS) return;
   twAutoChecking = true;
   void (async () => {
@@ -187,7 +187,7 @@ export function patchStatus(region: Region): HTMLElement[] {
       h(
         "div",
         { class: "patch-note warn" },
-        h("p", {}, "上次更新中斷，遊戲檔可能損毀，請先用官方啟動器修復"),
+        h("p", {}, "上次更新中斷，遊戲檔可能損毀，請先用官方啟動器修復。修復並在本程式確認之前，不要搬動或改名這個遊戲資料夾。"),
         fixed,
       ),
     );

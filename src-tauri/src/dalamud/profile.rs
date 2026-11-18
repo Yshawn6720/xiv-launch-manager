@@ -418,18 +418,18 @@ pub fn terminate(pid: u32) -> AppResult<()> {
 type RunningMap = BTreeMap<String, GameProcess>;
 /// profile_id → 使用中的遊戲程序；共用時多筆。
 type ProfileUsers = BTreeMap<String, Vec<GameProcess>>;
+/// 只補記寫入失敗的遊戲；根目錄分開，避免不同資料目錄互相影響。
+static UNRECORDED: Mutex<BTreeMap<PathBuf, ProfileUsers>> = Mutex::new(BTreeMap::new());
 
 /// 兩份紀錄的讀改寫鎖（見模組說明）；臨界區只有讀檔、改 map、寫檔，沒有會留下半更新狀態的 panic 點（寫檔是
 /// 暫存檔＋rename），poison 後可直接沿用。
 static RECORDS: Mutex<()> = Mutex::new(());
 
-/// 檔案不存在＝沒有紀錄；格式錯誤回報錯誤而不是當成空的，避免把使用中的 profile 當成沒人用。
+/// 檔案不存在＝沒有紀錄；讀取或解析失敗時，不把使用中的 profile 當成沒人用。
 fn read_profile_records(file: &Path) -> AppResult<ProfileUsers> {
-    match read_optional(file)? {
-        Some(bytes) => serde_json::from_slice(&bytes).map_err(|e| AppError::Io {
-            context: format!("解析 {}", file.file_name().unwrap_or_default().to_string_lossy()),
-            message: e.to_string(),
-        }),
+    let unavailable = || AppError::ProfileUsageUnavailable { path: file.display().to_string() };
+    match read_optional(file).map_err(|_| unavailable())? {
+        Some(bytes) => serde_json::from_slice(&bytes).map_err(|_| unavailable()),
         None => Ok(ProfileUsers::new()),
     }
 }
@@ -458,16 +458,29 @@ fn read_optional(file: &Path) -> AppResult<Option<Vec<u8>>> {
 pub fn profile_in_use(paths: &AppPaths, profile_id: &str) -> AppResult<bool> {
     Ok(read_profile_records(&paths.profiles_running_file())?
         .get(profile_id)
-        .is_some_and(|users| users.iter().any(is_alive)))
+        .is_some_and(|users| users.iter().any(is_alive))
+        || UNRECORDED.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(paths.root())
+            .and_then(|profiles| profiles.get(profile_id))
+            .is_some_and(|users| users.iter().any(is_alive)))
 }
 
 /// 正被至少一個仍在執行的遊戲使用的 profile id（依 id 排序）；已結束的只略過不寫回（讀取端不持有 launch mutex）。
 pub fn profiles_in_use(paths: &AppPaths) -> AppResult<Vec<String>> {
-    Ok(read_profile_records(&paths.profiles_running_file())?
+    let mut active: Vec<_> = read_profile_records(&paths.profiles_running_file())?
         .into_iter()
         .filter(|(_, users)| users.iter().any(is_alive))
         .map(|(id, _)| id)
-        .collect())
+        .collect();
+    if let Some(profiles) = UNRECORDED.lock().unwrap_or_else(PoisonError::into_inner).get(paths.root()) {
+        for (id, users) in profiles {
+            if let Err(index) = active.binary_search(id) && users.iter().any(is_alive) {
+                active.insert(index, id.clone());
+            }
+        }
+    }
+    Ok(active)
 }
 
 /// 注入成功後記錄 profile 佔用；同一 profile 已有別的遊戲在用時並列記錄（共用）。
@@ -481,6 +494,19 @@ pub fn mark_running(paths: &AppPaths, profile_id: &str, process: &GameProcess) -
     running.retain(|_, users| !users.is_empty());
     running.entry(profile_id.to_string()).or_default().push(*process);
     store::write_json_atomic(&file, &running)
+}
+
+pub fn mark_running_or_warn(paths: &AppPaths, profile_id: &str, process: &GameProcess) -> Option<String> {
+    let error = mark_running(paths, profile_id, process).err()?;
+    eprintln!("無法寫入 Dalamud 設定檔佔用紀錄：{error}");
+    let mut unrecorded = UNRECORDED.lock().unwrap_or_else(PoisonError::into_inner);
+    let profiles = unrecorded.entry(paths.root().to_path_buf()).or_default();
+    profiles.retain(|_, users| {
+        users.retain(is_alive);
+        !users.is_empty()
+    });
+    profiles.entry(profile_id.to_string()).or_default().push(*process);
+    Some("Dalamud 設定檔佔用紀錄沒寫成；本程式重開前仍會把它當成使用中，重開後請自行確認沒有共用".into())
 }
 
 /// 撤銷 [`mark_running`]（遊戲提早結束時）：只刪 `process` 那一筆，同一 profile 的其他遊戲不動。
@@ -661,6 +687,42 @@ mod tests {
         mark_account_running(&paths, "acc", &me).expect("write");
         assert_eq!(running_accounts(&paths).expect("read"), ["acc", "alive"]);
         assert_eq!(account_processes(&paths).expect("read").len(), 2);
+    }
+
+    #[test]
+    fn unrecorded_use_still_counts_in_this_run() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::process::{Command, Stdio};
+        use windows::Win32::Storage::FileSystem::FILE_SHARE_READ;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        let file = paths.profiles_running_file();
+        store::write_json_atomic(&file, &ProfileUsers::new()).expect("seed");
+        let _locked = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ.0)
+            .open(&file)
+            .expect("lock");
+        let system_root = std::env::var_os("SystemRoot").expect("SystemRoot");
+        let mut child = Command::new(Path::new(&system_root).join(r"System32\waitfor.exe"))
+            .args(["/t", "120", &format!("xlm{}", uuid::Uuid::new_v4().simple())])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start stand-in game");
+        let game = process_identity(child.id()).expect("identity").expect("stand-in alive");
+        let warning = mark_running_or_warn(&paths, "p1", &game);
+        let in_use = profile_in_use(&paths, "p1").expect("read while locked");
+        let profiles = profiles_in_use(&paths).expect("list while locked");
+        child.kill().expect("kill");
+        child.wait().expect("reap");
+
+        assert!(matches!(warning.as_deref(), Some(text) if text.contains("重開後")), "{warning:?}");
+        assert!(in_use);
+        assert_eq!(profiles, ["p1"]);
+        assert!(!profile_in_use(&paths, "p1").expect("read after exit"));
+        assert!(profiles_in_use(&paths).expect("list after exit").is_empty());
     }
 
     /// 撤銷只刪同一程序的那一筆：共用中的其他遊戲、已換成別的程序（例如之後又登入）的帳號紀錄、其他項目都不動。

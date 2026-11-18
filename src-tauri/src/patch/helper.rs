@@ -387,6 +387,7 @@ fn run_shadow_helper(install_arg: &Path, pack_dir: &Path) -> i32 {
     };
     match shadow::build(&root, &install, &plan, shadow::create_protected_dir) {
         Ok(()) => EXIT_SUCCESS,
+        Err(AppError::ShadowRootUnowned { .. }) => EXIT_ABORTED_BEFORE_WRITE,
         Err(_) => EXIT_FAILED_AFTER_WRITE,
     }
 }

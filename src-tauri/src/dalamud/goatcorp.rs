@@ -54,10 +54,10 @@ pub enum GameVersionCheck {
 }
 
 /// `Enforce` 時 `SupportedGameVer` 必須等於本機 `ffxivgame.ver`，否則不可注入；`Skip` 不比對。
-pub fn check_game_version(info: &VersionInfo, install_dir: &Path, check: GameVersionCheck) -> AppResult<()> {
+pub fn check_game_version(info: &VersionInfo, install_dir: &Path, check: GameVersionCheck) -> AppResult<Option<String>> {
     match check {
         GameVersionCheck::Enforce => {}
-        GameVersionCheck::Skip => return Ok(()),
+        GameVersionCheck::Skip => return Ok(None),
     }
     let installed = game::game_version(install_dir)?;
     if info.supported_game_ver != installed {
@@ -66,7 +66,7 @@ pub fn check_game_version(info: &VersionInfo, install_dir: &Path, check: GameVer
             installed,
         });
     }
-    Ok(())
+    Ok(Some(installed))
 }
 
 /// 確保本體在 `dalamud/goatcorp/<AssemblyVersion>/`；已提交且重核通過就不覆寫。
@@ -131,7 +131,11 @@ mod tests {
             AppError::DalamudGameVersionMismatch { ref supported, ref installed }
                 if supported == "2026.10.06.0000.0000" && installed == "2026.10.16.0000.0000"
         ));
-        assert!(check_game_version(&stale, dir.path(), GameVersionCheck::Skip).is_ok());
-        assert!(check_game_version(&info("2026.10.16.0000.0000"), dir.path(), GameVersionCheck::Enforce).is_ok());
+        assert_eq!(check_game_version(&stale, dir.path(), GameVersionCheck::Skip).unwrap(), None);
+        assert_eq!(
+            check_game_version(&info("2026.10.16.0000.0000"), dir.path(), GameVersionCheck::Enforce)
+                .unwrap().as_deref(),
+            Some("2026.10.16.0000.0000")
+        );
     }
 }

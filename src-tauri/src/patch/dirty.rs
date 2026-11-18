@@ -68,9 +68,8 @@ pub fn ensure_clean(paths: &AppPaths, region: Region, install: &Path) -> AppResu
 fn load(paths: &AppPaths) -> AppResult<DirtyFile> {
     let file = paths.patch_dirty_file();
     match fs::read(&file) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| AppError::Io {
-            context: format!("解析 {}", file.display()),
-            message: e.to_string(),
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| AppError::PatchDirtyCorrupt {
+            path: file.display().to_string(),
         }),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(DirtyFile::default()),
         Err(e) => Err(AppError::io(format!("讀取 {}", file.display()), e)),
@@ -199,6 +198,10 @@ mod tests {
         fs::create_dir_all(file.parent().expect("parent")).expect("mkdir");
         fs::write(&file, b"{not json").expect("write");
         assert!(is_dirty(&paths, &install).is_err());
-        assert!(ensure_clean(&paths, Region::Global, &install).is_err());
+        let message = ensure_clean(&paths, Region::Global, &install)
+            .expect_err("損壞的標記不得放行")
+            .to_string();
+        assert!(message.contains(&file.display().to_string()), "{message}");
+        assert!(message.contains("每一個") && message.contains("官方啟動器修復"), "{message}");
     }
 }

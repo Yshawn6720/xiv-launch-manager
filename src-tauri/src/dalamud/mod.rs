@@ -27,11 +27,11 @@ pub use dll_version::file_version;
 pub use install::{CancelToken, DownloadCancel, Progress, Staging, download_to_file, download_to_file_exact, fetch_bytes, http_client, ProgressFn, parse_json, safe_relative_path};
 pub use profile::{
     GameProcess, account_processes, discard_profile_dir, duplicate_profile_data, ensure_profile_paths, is_alive,
-    mark_account_running, mark_running, profile_data_dir, profile_in_use, profile_log_dir, profiles_in_use,
+    mark_account_running, mark_running_or_warn, profile_data_dir, profile_in_use, profile_log_dir, profiles_in_use,
     running_account_pids, running_accounts, unmark_account_running, unmark_running, wait_for_exit,
 };
 #[cfg(test)]
-pub use profile::process_identity;
+pub use profile::{mark_running, process_identity};
 pub use goatcorp::GameVersionCheck;
 pub use runner::{InjectMode, InjectRequest, PluginLoad, launch_plain, launch_with_dalamud, watch_early_exit};
 pub use yanmucorp::{ReleaseInfo, list_releases};
@@ -48,6 +48,7 @@ pub struct PreparedDalamud {
     /// goatcorp 為 AssemblyVersion，yanmucorp 為 release tag。
     pub version: String,
     pub inject_mode: InjectMode,
+    checked_game_version: Option<String>,
 }
 
 /// 依版本選擇確保本體、runtime、assets 就緒（`install_dir`＝該區服遊戲安裝根目錄）。下載前先比對本機遊戲版本：
@@ -66,7 +67,7 @@ pub async fn prepare(
     match channel {
         DalamudChannel::Goatcorp => {
             let info = cancel.race(goatcorp::fetch_version_info(&client)).await?;
-            goatcorp::check_game_version(&info, install_dir, check)?;
+            let checked_game_version = goatcorp::check_game_version(&info, install_dir, check)?;
             let injector_dir =
                 goatcorp::ensure_body(&client, paths, &info, progress, cancel).await?;
             // RuntimeRequired 為假時與 XL 相同不下載 runtime；目錄可能不存在。
@@ -91,11 +92,12 @@ pub async fn prepare(
                 assets_dir,
                 version: info.assembly_version,
                 inject_mode: InjectMode::Launch,
+                checked_game_version,
             })
         }
         DalamudChannel::Yanmucorp { version } => {
             let tag = cancel.race(yanmucorp::resolve_tag(&client, version)).await?;
-            yanmucorp::check_game_version(paths, &tag, install_dir, check)?;
+            let checked_game_version = yanmucorp::check_game_version(paths, &tag, install_dir, check)?;
             let injector_dir = yanmucorp::ensure_body(&client, paths, &tag, progress, cancel).await?;
             let runtime_dir = runtime::ensure_nuget(
                 &client,
@@ -122,6 +124,7 @@ pub async fn prepare(
                 // launch 模式下 yanmucorp Injector 會跑陸服專用的 FfxivArgLauncher.ArgFixer，在台服
                 // 客戶端找不到修補目標（Nops Num:-1）而殺掉遊戲；改由本程式起遊戲後 attach（§2.5 備案）。
                 inject_mode: InjectMode::Attach,
+                checked_game_version,
             })
         }
     }
@@ -148,6 +151,10 @@ struct CachedPrepare {
 }
 
 impl PreparedCache {
+    pub fn clear(&self) {
+        *self.lock() = None;
+    }
+
     /// 記下剛準備好的結果，取代前一筆。
     pub fn store(&self, channel: &DalamudChannel, install_dir: &Path, check: GameVersionCheck, prepared: &PreparedDalamud) {
         *self.lock() = Some(CachedPrepare {
@@ -161,9 +168,9 @@ impl PreparedCache {
     }
 
     /// 有可沿用的結果就用它，不 await `prepare`；沒有才 await `prepare` 完整準備（線上取版本與 assets 清單、逐檔核對，
-    /// 核對失敗就重新下載）。可沿用＝同通道、同遊戲安裝、同版本比對選擇、[`REUSE_WINDOW`] 內準備好，本體依目錄內
-    /// `hashes.json` 重核通過（同完整準備對已安裝本體的核對），assets 目錄與準備時就在的 runtime 目錄仍在。不論沿用
-    /// 與否，暫存的結果都只用一次。
+    /// 核對失敗就重新下載）。可沿用＝同通道、同遊戲安裝、同版本比對選擇、[`REUSE_WINDOW`] 內準備好；比對過的
+    /// 遊戲版本未變、本體依 `hashes.json` 重核通過、assets 目錄與準備時就在的 runtime 目錄仍在。不論沿用與否，
+    /// 暫存的結果都只用一次。
     pub async fn reuse_or_prepare(
         &self,
         channel: &DalamudChannel,
@@ -187,6 +194,11 @@ impl PreparedCache {
             return None;
         }
         let prepared = cached.prepared;
+        if prepared.checked_game_version.as_deref().is_some_and(|version| {
+            crate::game::game_version(install_dir).ok().as_deref() != Some(version)
+        }) {
+            return None;
+        }
         let dirs_present =
             prepared.assets_dir.is_dir() && (!cached.runtime_present || prepared.runtime_dir.is_dir());
         // 重核不符或讀不到都不沿用：完整準備會再核對一次，不符就重新下載，讀不到就回報錯誤。
@@ -400,10 +412,16 @@ mod tests {
     // ── 單次準備（PreparedCache）──────────────────────────────────────────────
 
     const INJECTOR_BYTES: &[u8] = b"injector";
+    const GAME_VERSION: &str = "2026.09.14.0000.0000";
+    const NEW_GAME_VERSION: &str = "2026.11.04.0000.0000";
+    const VERSION_FILE: &str = "game/ffxivgame.ver";
 
     /// 已提交的本體（Injector＋列出它的 hashes.json）、runtime 與 assets 目錄。
-    fn prepared_fixture(root: &Path) -> PreparedDalamud {
+    fn prepared_fixture(root: &Path) -> (PreparedDalamud, PathBuf) {
         use md5::{Digest, Md5};
+        let install_dir = root.join("FFXIV TC");
+        fs::create_dir_all(install_dir.join("game")).expect("mkdir game");
+        fs::write(install_dir.join(VERSION_FILE), GAME_VERSION).expect("ver");
         let paths = AppPaths::new(root.join("app"));
         let injector_dir = paths.dalamud_dir(yanmucorp::SOURCE, "26-10-03-01");
         fs::create_dir_all(&injector_dir).expect("mkdir body");
@@ -421,13 +439,15 @@ mod tests {
         let assets_dir = paths.assets_dir(yanmucorp::SOURCE, "2");
         fs::create_dir_all(&runtime_dir).expect("mkdir runtime");
         fs::create_dir_all(&assets_dir).expect("mkdir assets");
-        PreparedDalamud {
+        let prepared = PreparedDalamud {
             injector_dir,
             runtime_dir,
             assets_dir,
             version: "26-10-03-01".into(),
             inject_mode: InjectMode::Attach,
-        }
+            checked_game_version: Some(GAME_VERSION.into()),
+        };
+        (prepared, install_dir)
     }
 
     /// `reuse_or_prepare` 是否走了完整準備（替身回傳 `fallback`）。
@@ -461,8 +481,7 @@ mod tests {
     #[tokio::test]
     async fn preparation_just_before_login_is_reused_once() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let prepared = prepared_fixture(dir.path());
-        let install_dir = dir.path().join("FFXIV TC");
+        let (prepared, install_dir) = prepared_fixture(dir.path());
         let channel = yanmucorp(YanmucorpVersion::Latest);
         let cache = PreparedCache::default();
 
@@ -480,10 +499,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn game_version_change_blocks_reuse() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut prepared, install_dir) = prepared_fixture(dir.path());
+        let channel = yanmucorp(YanmucorpVersion::Latest);
+        let cache = PreparedCache::default();
+        cache.store(&channel, &install_dir, GameVersionCheck::Enforce, &prepared);
+        fs::write(install_dir.join(VERSION_FILE), NEW_GAME_VERSION).expect("update ver");
+        assert!(prepared_fully(&cache, &channel, &install_dir, &prepared).await, "遊戲更新後應重新準備");
+
+        prepared.checked_game_version = None;
+        cache.store(&channel, &install_dir, GameVersionCheck::Skip, &prepared);
+        fs::write(install_dir.join(VERSION_FILE), GAME_VERSION).expect("change ver again");
+        assert!(!prepared_fully_with(&cache, &channel, &install_dir, GameVersionCheck::Skip, &prepared).await);
+    }
+
+    #[tokio::test]
+    async fn cache_keeps_the_version_the_check_compared() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut prepared, install_dir) = prepared_fixture(dir.path());
+        let channel = yanmucorp(YanmucorpVersion::Latest);
+        let cache = PreparedCache::default();
+        prepared.checked_game_version = Some(NEW_GAME_VERSION.into());
+        cache.store(&channel, &install_dir, GameVersionCheck::Enforce, &prepared);
+        assert!(prepared_fully(&cache, &channel, &install_dir, &prepared).await, "以比對時的版本為準");
+    }
+
+    #[tokio::test]
+    async fn cleared_cache_is_not_reused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (prepared, install_dir) = prepared_fixture(dir.path());
+        let channel = yanmucorp(YanmucorpVersion::Latest);
+        let cache = PreparedCache::default();
+        cache.store(&channel, &install_dir, GameVersionCheck::Enforce, &prepared);
+        cache.clear();
+        assert!(prepared_fully(&cache, &channel, &install_dir, &prepared).await, "清空後應重新準備");
+    }
+
+    #[tokio::test]
     async fn unprepared_mismatched_stale_or_failed_check_prepares_fully() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let prepared = prepared_fixture(dir.path());
-        let install_dir = dir.path().join("FFXIV TC");
+        let (mut prepared, install_dir) = prepared_fixture(dir.path());
         let channel = yanmucorp(YanmucorpVersion::Latest);
         let cache = PreparedCache::default();
 
@@ -516,6 +572,7 @@ mod tests {
         fs::create_dir_all(&prepared.assets_dir).expect("restore assets");
 
         // 不比對遊戲版本（設定頁下載、強制載入）準備的結果，不給比對的登入沿用。
+        prepared.checked_game_version = None;
         cache.store(&channel, &install_dir, GameVersionCheck::Skip, &prepared);
         assert!(prepared_fully(&cache, &channel, &install_dir, &prepared).await, "版本比對選擇不同");
         cache.store(&channel, &install_dir, GameVersionCheck::Skip, &prepared);

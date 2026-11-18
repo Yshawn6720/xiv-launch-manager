@@ -236,6 +236,8 @@ export interface LaunchOutcome {
   pid: number;
   /** 這次載入的 Dalamud 安裝目錄名（同 `InstalledVersion.version`）；沒載入為 null。 */
   dalamudVersion: string | null;
+  /** 設定檔佔用紀錄未寫成、只在本次執行補記的警告。 */
+  profileUsageWarning: string | null;
   /** 遊戲已啟動，但「登入遊戲後自動開啟 ACT」沒能開起 ACT 的原因（完整句子）；沒開或已開起為 null。 */
   actWarning: string | null;
   /** 遊戲已啟動，但 ACT 連動指令檔沒寫成的原因（完整句子）；寫成為 null。 */
@@ -389,6 +391,7 @@ export const GAME_EXITED_EARLY_EVENT = "game-exited-early";
 
 export interface GameExitedEarlyPayload {
   accountId: string;
+  pid: number;
   message: string;
 }
 
@@ -400,6 +403,9 @@ export const installProgressId = (r: Region): string => `install:${r}`;
  * 完整性檢查共用），或在繁中服登入確認視窗按「取消」／關窗（`AppError::RecaptchaCancelled`）。不算登入失敗。
  */
 export const CANCELLED_MESSAGE = "已取消";
+
+/** 國際服衛月版本不符（`AppError::DalamudGameVersionMismatch`）的固定開頭；與 Rust 訊息同步。 */
+export const DALAMUD_GAME_VERSION_MISMATCH_PREFIX = "Dalamud 目前只支援遊戲版本 ";
 
 /**
  * 啟動時版本檢查取得了 patch list（`AppError::UpdateRequired`，清單已存成 pending）時錯誤訊息的結尾；

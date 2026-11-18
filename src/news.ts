@@ -5,7 +5,7 @@ import { draft, type LoginDraft } from "./login";
 // ---------- 官方消息 ----------
 
 /**
- * 側欄的官方消息（protocols §1.4.2、§2.7）：跟登入面板目前的區服（新增帳號時跟表單選的區服），國際服再依「進階 › 語言」
+ * 登入面板下方的官方消息（protocols §1.4.2、§2.7）：跟目前選的區服（新增帳號時跟表單選的區服），國際服再依「進階 › 語言」
  * 取該語言的公告。各服（國際服各語言）各自快取：第一次用到才抓，之後換帳號不重抓、也不定時重抓；取不到時可點擊重試，
  * 只重抓那一份，原因放在重試按鈕的 title。
  */
@@ -17,12 +17,12 @@ interface NewsSource {
   key: string;
 }
 const newsCache = new Map<string, NewsState>();
-/** accountPane() 新建的面板；抓取結果回來，或區服、語言改了時就地更新，不重繪整個登入頁。 */
-let newsPanel: { root: HTMLElement; title: HTMLElement; shop: HTMLButtonElement; body: HTMLElement } | null = null;
+/** 抓取結果回來，或區服、語言改了時就地更新。 */
+let newsPanel: { root: HTMLElement; title: HTMLElement; shop: HTMLButtonElement; shopLabel: HTMLElement; body: HTMLElement } | null = null;
 
-const SHOP_TITLE: Record<Region, string> = {
-  global: "以瀏覽器開啟國際服 Mog Station（水晶商城）",
-  tw: "以瀏覽器開啟繁中服水晶商城",
+const SHOP_LABEL: Record<Region, string> = {
+  global: "Mog Station",
+  tw: "水晶商城",
 };
 
 function newsSource(d: LoginDraft): NewsSource {
@@ -59,10 +59,11 @@ export function paintNews(): void {
     loadNews(src);
     return;
   }
-  const { root, title, shop, body } = newsPanel;
+  const { root, title, shop, shopLabel, body } = newsPanel;
   root.className = `news-group ${src.region}`;
   title.textContent = `${regionLabel(src.region)}消息`;
-  shop.title = SHOP_TITLE[src.region];
+  shopLabel.textContent = SHOP_LABEL[src.region];
+  shop.title = `以瀏覽器開啟 ${SHOP_LABEL[src.region]}`;
   switch (s.kind) {
     case "loading":
       body.replaceChildren(h("p", { class: "news-note" }, "載入中…"));
@@ -94,17 +95,15 @@ function newsItem(region: Region, n: NewsItem): HTMLElement {
   return h("li", {}, b);
 }
 
-/**
- * 側欄帳號清單下方的消息面板：區服色底與細條，標題列左邊是圖示＋「國際服消息」／「繁中服消息」（區服色），右邊是「水晶商城」
- * （protocols §1.4.3、§2.8；全程式唯一的商城入口），開同一個區服的官方商城。
- */
+/** 消息與商城使用同一區服（protocols §1.4.3、§2.8）。 */
 export function newsGroup(): HTMLElement {
   const title = h("span");
+  const shopLabel = h("span");
   const shop = h(
     "button",
     { type: "button", class: "secondary shop-button" },
     h("span", { class: "shop-icon", "aria-hidden": "true" }),
-    "水晶商城",
+    shopLabel,
   );
   // 同開消息：不走 run()，失敗只顯示訊息。跟著面板目前的區服（draft 換區服時 paintNews 會更新標題與 title）。
   shop.addEventListener("click", () => {
@@ -122,7 +121,7 @@ export function newsGroup(): HTMLElement {
     ),
     body,
   );
-  newsPanel = { root, title, shop, body };
+  newsPanel = { root, title, shop, shopLabel, body };
   paintNews();
   return root;
 }

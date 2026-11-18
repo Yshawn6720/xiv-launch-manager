@@ -18,7 +18,7 @@ use sha1::{Digest, Sha1};
 
 use crate::error::{AppError, AppResult};
 use crate::game;
-use crate::patch::update::{self, RawPatchList, VersionCheck};
+use crate::patch::update::{self, RawPatchList, SubmittedVersions, VersionCheck};
 use crate::region::Region;
 
 const LEASE_URL: &str = "https://kamori.goats.dev/Launcher/GetLease";
@@ -272,7 +272,7 @@ pub async fn login(
     install: &Path,
     username: &str,
     password: &str,
-    otp: Option<&str>,
+    otp: Option<impl FnOnce() -> AppResult<Option<String>>>,
 ) -> AppResult<VersionCheck<GlobalSession>> {
     let game_version = update::required_game_version(Region::Global, install)?;
     let client = se_client()?;
@@ -293,12 +293,16 @@ pub async fn login(
         .await
         .map_err(|e| AppError::network("讀取國際服登入頁", e))?;
     let stored = parse_stored(&top)?;
+    let code = match otp {
+        Some(get_code) => get_code()?,
+        None => None,
+    };
 
     let form = [
         ("_STORED_", stored.as_str()),
         ("sqexid", username),
         ("password", password),
-        ("otppw", otp.unwrap_or("")),
+        ("otppw", code.as_deref().unwrap_or("")),
     ];
     let reply = client
         .post(LOGIN_SEND_URL)
@@ -326,7 +330,7 @@ pub async fn login(
         return Err(AppError::TermsNotAccepted);
     }
 
-    let unique_id = match register_session(&client, install, &game_version, &oauth).await? {
+    let unique_id = match register_session(&client, install, game_version, &oauth).await? {
         VersionCheck::UpToDate(unique_id) => unique_id,
         VersionCheck::PatchList(list) => return Ok(VersionCheck::PatchList(list)),
     };
@@ -341,10 +345,10 @@ pub async fn login(
 async fn register_session(
     client: &reqwest::Client,
     install: &Path,
-    game_version: &str,
+    game_version: String,
     oauth: &OauthResult,
 ) -> AppResult<VersionCheck<String>> {
-    let report = version_report(install, oauth.max_expansion)?;
+    let (report, expansions) = version_report(install, oauth.max_expansion)?;
     let url = format!(
         "https://patch-gamever.ffxiv.com/http/win32/ffxivneo_release_game/{game_version}/{}",
         oauth.sid
@@ -377,16 +381,18 @@ async fn register_session(
     } else {
         Vec::new()
     };
-    classify_session(status, unique_id, content_type, body)
+    let versions = SubmittedVersions { game: game_version, expansions };
+    classify_session(status, unique_id, content_type, body, versions)
 }
 
 /// protocols §5.1：409＝boot 需修復；410＝版本不再服務（不是清單來源，提示官方啟動器）；其他非 2xx＝檢查失敗；
-/// 2xx 必須有 UID；空 body＝無需更新（回 UID）；非空 body＝patch list（只交回 Content-Type 與 body）。
+/// 2xx 必須有 UID；空 body＝無需更新（回 UID）；非空 body＝patch list（不含 UID）。
 fn classify_session(
     status: u16,
     unique_id: Option<String>,
     content_type: String,
     body: Vec<u8>,
+    versions: SubmittedVersions,
 ) -> AppResult<VersionCheck<String>> {
     match status {
         409 => return Err(AppError::BootModified),
@@ -409,7 +415,7 @@ fn classify_session(
     if body.is_empty() {
         Ok(VersionCheck::UpToDate(unique_id))
     } else {
-        Ok(VersionCheck::PatchList(RawPatchList { content_type, body }))
+        Ok(VersionCheck::PatchList(RawPatchList { content_type, body, versions }))
     }
 }
 
@@ -491,7 +497,7 @@ fn parse_oauth_reply(reply: &str) -> AppResult<OauthResult> {
 
 /// Session 註冊 body：boot 檔雜湊行，接著每個 ex{1..=max} 一行版本。`exN.ver` 缺失即
 /// [`AppError::VersionFileMissing`]，不以基礎版本兜底。
-fn version_report(install: &Path, max_expansion: u8) -> AppResult<String> {
+fn version_report(install: &Path, max_expansion: u8) -> AppResult<(String, Vec<Option<String>>)> {
     let boot_dir = install.join("boot");
     let mut report = game::boot_version(install)?;
     report.push('=');
@@ -513,11 +519,13 @@ fn version_report(install: &Path, max_expansion: u8) -> AppResult<String> {
         ));
     }
     report.push('\n');
+    let mut expansions = Vec::with_capacity(usize::from(max_expansion));
     for n in 1..=max_expansion {
         let version = update::required_expansion_version(Region::Global, install, n)?;
         report.push_str(&format!("ex{n}\t{version}\n"));
+        expansions.push(Some(version));
     }
-    Ok(report)
+    Ok((report, expansions))
 }
 
 #[cfg(test)]
@@ -589,20 +597,10 @@ mod tests {
         assert!(!err.to_string().contains("SECRETSID0123"));
     }
 
-    #[test]
-    fn version_report_lists_boot_hashes_and_expansions() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let install = dir.path();
+    fn write_report_fixture(install: &Path) {
         let boot = install.join("boot");
         fs::create_dir_all(&boot).expect("mkdir boot");
         fs::write(boot.join("ffxivboot.ver"), "2026.08.01.0000.0001").expect("boot ver");
-
-        // 缺 boot 檔＝安裝不完整。
-        assert!(matches!(
-            version_report(install, 1),
-            Err(AppError::GameFileMissing { .. })
-        ));
-
         for name in BOOT_FILES {
             fs::write(boot.join(name), b"abc").expect("boot file");
         }
@@ -611,6 +609,17 @@ mod tests {
             fs::create_dir_all(&ex).expect("mkdir ex");
             fs::write(ex.join(format!("ex{n}.ver")), ver).expect("ex ver");
         }
+    }
+
+    #[test]
+    fn version_report_lists_boot_hashes_and_expansions() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let install = dir.path();
+        assert!(matches!(
+            version_report(install, 1),
+            Err(AppError::GameFileMissing { .. })
+        ));
+        write_report_fixture(install);
 
         // SHA1("abc") = a9993e364706816aba3e25717850c26c9cd0d89d。
         let h = "3/a9993e364706816aba3e25717850c26c9cd0d89d";
@@ -619,9 +628,9 @@ mod tests {
              ex1\t2026.09.01.0000.0000\n\
              ex2\t2026.09.02.0000.0000\n"
         );
-        assert_eq!(version_report(install, 2).expect("report"), expected);
+        assert_eq!(version_report(install, 2).expect("report").0, expected);
         assert_eq!(
-            version_report(install, 0).expect("report"),
+            version_report(install, 0).expect("report").0,
             expected.lines().next().map(|l| format!("{l}\n")).expect("first line")
         );
         // ex3 缺檔：不以基礎版本兜底，拒絕註冊。
@@ -634,6 +643,18 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn version_report_records_only_the_expansions_sent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_report_fixture(dir.path());
+        let (report, expansions) = version_report(dir.path(), 1).expect("report");
+        assert_eq!(
+            report.lines().skip(1).collect::<Vec<_>>(),
+            ["ex1\t2026.09.01.0000.0000"]
+        );
+        assert_eq!(expansions, [Some("2026.09.01.0000.0000".into())]);
+    }
+
     #[tokio::test]
     async fn missing_game_version_is_rejected_before_any_request() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -642,9 +663,11 @@ mod tests {
             flags: 0,
         };
         // 先檢查 ffxivgame.ver 才建 client 送 OAuth；送了請求會是網路或登入錯誤，不是這個。
-        let err = login(&lease, dir.path(), "user", "password", None)
-            .await
-            .expect_err("err");
+        let err = login(&lease, dir.path(), "user", "password", Some(|| {
+            panic!("遊戲版本檔缺失時不應取 OTP")
+        }))
+        .await
+        .expect_err("err");
         assert!(
             matches!(err, AppError::VersionFileMissing { region: Region::Global, .. }),
             "{err}"
@@ -654,6 +677,10 @@ mod tests {
     const LIST_CONTENT_TYPE: &str = "multipart/mixed; boundary=477D80B1_38BC_41d4_8B48_5273ADB89CAC";
     const SECRET_UID: &str = "UIDSECRET0123456789";
 
+    fn submitted_versions() -> SubmittedVersions {
+        SubmittedVersions { game: "2026.09.01.0000.0000".into(), expansions: Vec::new() }
+    }
+
     #[test]
     fn session_2xx_with_uid_and_body_hands_back_patch_list_without_uid() {
         let body = b"--477D80B1_38BC_41d4_8B48_5273ADB89CAC\r\n\r\npatch line\r\n".to_vec();
@@ -662,6 +689,7 @@ mod tests {
             Some(SECRET_UID.into()),
             LIST_CONTENT_TYPE.into(),
             body.clone(),
+            submitted_versions(),
         )
         .expect("list");
         let VersionCheck::PatchList(list) = result else {
@@ -675,21 +703,21 @@ mod tests {
 
     #[test]
     fn session_2xx_with_empty_body_returns_uid() {
-        let result = classify_session(200, Some(SECRET_UID.into()), String::new(), Vec::new());
+        let result = classify_session(200, Some(SECRET_UID.into()), String::new(), Vec::new(), submitted_versions());
         assert!(matches!(result, Ok(VersionCheck::UpToDate(uid)) if uid == SECRET_UID));
     }
 
     #[test]
     fn session_2xx_without_uid_is_protocol_error_even_with_list() {
         for uid in [None, Some(String::new())] {
-            let result = classify_session(200, uid, LIST_CONTENT_TYPE.into(), b"body".to_vec());
+            let result = classify_session(200, uid, LIST_CONTENT_TYPE.into(), b"body".to_vec(), submitted_versions());
             assert!(matches!(result, Err(AppError::Protocol { .. })));
         }
     }
 
     #[test]
     fn session_error_statuses_keep_existing_errors() {
-        let classify = |status| classify_session(status, None, String::new(), Vec::new());
+        let classify = |status| classify_session(status, None, String::new(), Vec::new(), submitted_versions());
         assert!(matches!(classify(409), Err(AppError::BootModified)));
         assert!(matches!(
             classify(410),

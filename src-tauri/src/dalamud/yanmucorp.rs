@@ -119,17 +119,17 @@ pub async fn resolve_tag(client: &reqwest::Client, version: &YanmucorpVersion) -
 /// 繁中服版本比對（protocols §2.5「版本比對」）：`Enforce` 時 `tag` 推定是比本機遊戲舊的版本用的就回
 /// `DalamudOlderThanGame`；`Skip`（該次登入選「強制載入」、設定頁下載）不比對。yanmucorp 沒有支援版本資料，
 /// 依據只有該 tag 目錄裡 Dalamud 自己寫的 `cachedSigs` 檔名與 tag 的發布日期。
-pub fn check_game_version(paths: &AppPaths, tag: &str, install_dir: &Path, check: GameVersionCheck) -> AppResult<()> {
+pub fn check_game_version(paths: &AppPaths, tag: &str, install_dir: &Path, check: GameVersionCheck) -> AppResult<Option<String>> {
     match check {
         GameVersionCheck::Enforce => {}
-        GameVersionCheck::Skip => return Ok(()),
+        GameVersionCheck::Skip => return Ok(None),
     }
     let installed = game::game_version(install_dir)?;
     let cached = cached_sig_versions(&paths.dalamud_dir(SOURCE, tag).join(CACHED_SIGS_DIR))?;
     if older_than_game(tag, &installed, &cached) {
         return Err(AppError::DalamudOlderThanGame { tag: tag.to_string(), installed });
     }
-    Ok(())
+    Ok(Some(installed))
 }
 
 /// `cachedSigs` 裡以遊戲版本命名的快取檔（`{版本}.json`）的版本號。檔名不是 `數字(.數字)*.json` 的忽略
@@ -246,7 +246,7 @@ mod tests {
     use super::*;
 
     /// 以 `installed` 為本機遊戲版本、`cached` 為 `cachedSigs` 檔名（含副檔名），跑一次 `Enforce` 比對。
-    fn enforce(tag: &str, installed: &str, cached: &[&str]) -> AppResult<()> {
+    fn enforce(tag: &str, installed: &str, cached: &[&str]) -> AppResult<Option<String>> {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().join("app"));
         let install_dir = dir.path().join("FFXIV TC");
@@ -262,14 +262,18 @@ mod tests {
         check_game_version(&paths, tag, &install_dir, GameVersionCheck::Enforce)
     }
 
-    fn is_older(result: AppResult<()>, tag: &str, version: &str) -> bool {
+    fn is_older(result: AppResult<Option<String>>, tag: &str, version: &str) -> bool {
         matches!(result, Err(AppError::DalamudOlderThanGame { tag: ref t, ref installed }) if t == tag && installed == version)
     }
 
     /// 2026-11-10 本機：`26-10-03-01` 已在 7.25（`2026.09.14`）跑過，還有不是版本號的 `cs.json`。
     #[test]
     fn tag_that_ran_on_the_installed_game_passes() {
-        assert!(enforce("26-10-03-01", "2026.09.14.0000.0000", &["2026.09.14.0000.0000.json", "cs.json"]).is_ok());
+        assert_eq!(
+            enforce("26-10-03-01", "2026.09.14.0000.0000", &["2026.09.14.0000.0000.json", "cs.json"])
+                .unwrap().as_deref(),
+            Some("2026.09.14.0000.0000")
+        );
     }
 
     /// 遊戲改版後舊 tag 還沒更新：新版建置日在 tag 發布日之後或之前，都因只跑過較舊版本而擋下。
@@ -306,7 +310,7 @@ mod tests {
         let install_dir = dir.path().join("FFXIV TC");
         fs::create_dir_all(install_dir.join("game")).expect("mkdir game");
         fs::write(install_dir.join("game/ffxivgame.ver"), "2026.11.04.0000.0000").expect("ver");
-        assert!(check_game_version(&paths, "26-10-03-01", &install_dir, GameVersionCheck::Skip).is_ok());
+        assert_eq!(check_game_version(&paths, "26-10-03-01", &install_dir, GameVersionCheck::Skip).unwrap(), None);
     }
 
     #[test]

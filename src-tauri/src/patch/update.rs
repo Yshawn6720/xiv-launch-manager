@@ -3,7 +3,7 @@
 //! （其餘情況）。
 //!
 //! 不變量：
-//! - pending 只存解析後的清單與安裝根目錄，不存 UID／SID。
+//! - pending 只存解析後的清單、安裝根目錄與送出的版本，不存 UID／SID。
 //! - [`update_game`] 的呼叫端持有 app-wide launch mutex 到回傳為止（國際服經 helper 時含 UAC 與 helper 執行）。
 //! - 第一筆寫入遊戲目錄前寫 dirty 標記並落盤；只有確定沒寫壞遊戲目錄的結果才清除。
 //! - 套用前的失敗（下載、核對、取消）只刪本次的 patch 檔，不留標記、不提示修復。
@@ -22,6 +22,7 @@ use tokio::sync::watch;
 
 use crate::dalamud::{self, CancelToken, Progress, ProgressFn};
 use crate::error::{AppError, AppResult};
+use crate::game;
 use crate::patch::access::{self, AccessToken};
 use crate::patch::apply::{self, ApplyFailure, ApplyProgress};
 use crate::patch::dirty;
@@ -41,12 +42,19 @@ const MAX_REDIRECTS: usize = 10;
 /// 輪詢 helper 進度檔的間隔。
 const HELPER_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
-/// 版本檢查回應中的 patch list 原文（protocols §5.1），尚未解析。只有 Content-Type 與 body：
-/// 國際服 session 註冊的 UID 不放進來。
+/// 版本檢查實際送出的版本。`expansions` 從 ex1 起依序記錄，`None` 表示當時缺檔。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubmittedVersions {
+    pub game: String,
+    pub expansions: Vec<Option<String>>,
+}
+
+/// 版本檢查回應中的 patch list 原文（protocols §5.1）與該請求的版本，不含 UID。
 #[derive(Clone, PartialEq, Eq)]
 pub struct RawPatchList {
     pub content_type: String,
     pub body: Vec<u8>,
+    pub versions: SubmittedVersions,
 }
 
 /// 不印 body：國際服清單來自含 SID 的請求，一律不回顯清單內容（同 `patch::list`）。
@@ -101,14 +109,23 @@ fn required_ver(region: Region, file: &Path) -> AppResult<String> {
     }
 }
 
-/// 一個區服待套用的更新：解析過的清單與取得清單時的安裝根目錄。
+/// 一個區服待套用的更新：清單、查詢時的安裝根目錄及送出的版本。
 #[derive(Debug, Clone)]
 pub struct PendingUpdate {
     pub install: PathBuf,
     pub patches: Vec<PatchEntry>,
+    versions: SubmittedVersions,
 }
 
 impl PendingUpdate {
+    fn still_applies(&self, region: Region, install: &Path) -> bool {
+        self.install == install
+            && required_game_version(region, install).is_ok_and(|ver| ver == self.versions.game)
+            && (1..=u8::MAX).zip(&self.versions.expansions).all(|(n, expected)| {
+                game::expansion_version(install, n).is_ok_and(|current| &current == expected)
+            })
+    }
+
     pub fn summary(&self) -> PendingSummary {
         PendingSummary {
             patch_count: self.patches.len(),
@@ -160,17 +177,18 @@ impl PendingUpdates {
 }
 
 /// 解析清單並存成該區服的 pending。解析失敗即清掉 pending 並回該錯誤（失敗關閉：不啟動、不更新）。
-pub fn store_patch_list(
+fn store_patch_list(
     pending: &PendingUpdates,
     region: Region,
     install: &Path,
-    raw: &RawPatchList,
+    raw: RawPatchList,
 ) -> AppResult<PendingSummary> {
     match list::parse_patch_list(region, &raw.content_type, &raw.body) {
         Ok(patches) => {
             let update = PendingUpdate {
                 install: install.to_path_buf(),
                 patches,
+                versions: raw.versions,
             };
             let summary = update.summary();
             pending.set(region, Some(update));
@@ -197,7 +215,7 @@ pub fn require_up_to_date<T>(
             Ok(value)
         }
         VersionCheck::PatchList(raw) => {
-            let summary = store_patch_list(pending, region, install, &raw)?;
+            let summary = store_patch_list(pending, region, install, raw)?;
             Err(AppError::UpdateRequired {
                 region,
                 patch_count: summary.patch_count,
@@ -233,7 +251,7 @@ pub async fn check_game_update(
                     Ok(GameUpdateStatus::UpToDate)
                 }
                 VersionCheck::PatchList(raw) => Ok(GameUpdateStatus::UpdateAvailable(
-                    store_patch_list(pending, region, &install, &raw)?,
+                    store_patch_list(pending, region, &install, raw)?,
                 )),
             }
         }
@@ -334,12 +352,14 @@ async fn update_with(
 ) -> AppResult<()> {
     let install = configured_install(paths, region)?;
     dirty::ensure_clean(paths, region, &install)?;
-    let update = pending
-        .get(region)
-        .filter(|update| update.install == install)
-        .ok_or_else(|| AppError::NotFound {
-            what: format!("{region} 待套用的遊戲更新（請先檢查更新）"),
-        })?;
+    let missing = || AppError::NotFound {
+        what: format!("{region} 待套用的遊戲更新（請先檢查更新）"),
+    };
+    let update = pending.get(region).ok_or_else(missing)?;
+    if !update.still_applies(region, &install) {
+        pending.set(region, None);
+        return Err(missing());
+    }
     if running::install_in_use(&install)? {
         return Err(AppError::GameRunning);
     }
@@ -349,7 +369,24 @@ async fn update_with(
 
     let patches = download_all(client, paths, region, &install, &update.patches, progress, cancel).await?;
     let downloaded: Vec<PathBuf> = patches.iter().map(|p| p.path.clone()).collect();
-    if let Err(e) = cancel.check().and_then(|()| dirty::mark(paths, &install)) {
+    if !configured_install(paths, region).is_ok_and(|current| update.still_applies(region, &current)) {
+        remove_files(&downloaded);
+        pending.set(region, None);
+        return Err(missing());
+    }
+    let pre_apply = cancel.check().and_then(|()| {
+        let required = total_length(&update.patches);
+        let available = free_space(&install)?;
+        if available < required {
+            return Err(AppError::InsufficientDiskSpace {
+                path: install.display().to_string(),
+                required,
+                available,
+            });
+        }
+        dirty::mark(paths, &install)
+    });
+    if let Err(e) = pre_apply {
         remove_files(&downloaded);
         return Err(e);
     }
@@ -655,6 +692,10 @@ async fn download_all(
 ) -> AppResult<Vec<JobPatch>> {
     let dir = paths.patches_dir().join(region_dir(region));
     fs::create_dir_all(&dir).map_err(|e| AppError::io("建立 patch 下載目錄", e))?;
+    let destinations: Vec<_> = entries.iter()
+        .map(|entry| dir.join(repo_dir(entry.repo)).join(&entry.file_name))
+        .collect();
+    remove_files(&destinations);
     let required = total_length(entries);
     let volumes = [
         (dir.as_path(), free_space(&dir)?),
@@ -670,8 +711,7 @@ async fn download_all(
 
     let count = entries.len();
     let mut done: Vec<JobPatch> = Vec::with_capacity(count);
-    for (index, entry) in entries.iter().enumerate() {
-        let dest = dir.join(repo_dir(entry.repo)).join(&entry.file_name);
+    for (index, (entry, dest)) in entries.iter().zip(destinations).enumerate() {
         if let Err(e) = fetch_and_verify(client, entry, &dest, index, count, progress, cancel).await {
             let mut written: Vec<PathBuf> = done.into_iter().map(|p| p.path).collect();
             written.push(dest);
@@ -918,11 +958,12 @@ pub(crate) mod test_support {
     use sha1::{Digest, Sha1};
 
     use super::{
-        GameUpdateProgressFn, PatchTransport, PendingUpdate, PendingUpdates, build_patch_client,
-        update_with,
+        GameUpdateProgressFn, PatchTransport, PendingUpdate, PendingUpdates, SubmittedVersions,
+        build_patch_client, required_game_version, update_with,
     };
     use crate::dalamud::CancelToken;
     use crate::error::AppResult;
+    use crate::game;
     use crate::patch::list::{self, PatchEntry, Repo};
     use crate::region::Region;
     use crate::store::{self, Account, AppPaths, Config, OtpMode};
@@ -1071,11 +1112,18 @@ pub(crate) mod test_support {
 
         pub(crate) fn pending_for(&self, region: Region, patches: Vec<PatchEntry>) -> PendingUpdates {
             let pending = PendingUpdates::default();
+            let versions = SubmittedVersions {
+                game: required_game_version(region, &self.install).expect("game version"),
+                expansions: (1..=game::MAX_EXPANSION)
+                    .map(|n| game::expansion_version(&self.install, n).expect("expansion version"))
+                    .collect(),
+            };
             pending.set(
                 region,
                 Some(PendingUpdate {
                     install: self.install.clone(),
                     patches,
+                    versions,
                 }),
             );
             pending
@@ -1231,7 +1279,10 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
+    use std::os::windows::fs::OpenOptionsExt;
     use std::sync::Arc;
+
+    use windows::Win32::Storage::FileSystem::FILE_SHARE_READ;
 
     use super::test_support::{
         EX1_DAT, EX1_URL_PATH, EX1_VER, EX1_VERSION, GAME_VER, OLD_VERSION, Snapshot, Stub,
@@ -1243,9 +1294,12 @@ mod tests {
     use crate::patch::running::test_support::{FakeProcess, GAME_PROCESSES};
 
     fn tw_list() -> RawPatchList {
+        let mut expansions = vec![None; usize::from(crate::game::MAX_EXPANSION)];
+        expansions[0] = Some(OLD_VERSION.into());
         RawPatchList {
             content_type: TW_CONTENT_TYPE.trim().to_string(),
             body: TW_BODY.to_vec(),
+            versions: SubmittedVersions { game: OLD_VERSION.into(), expansions },
         }
     }
 
@@ -1281,7 +1335,7 @@ mod tests {
     fn rejected_list_clears_pending_and_is_returned() {
         let pending = PendingUpdates::default();
         let install = Path::new(r"C:\Games\FFXIV TC");
-        store_patch_list(&pending, Region::Tw, install, &tw_list()).expect("store");
+        store_patch_list(&pending, Region::Tw, install, tw_list()).expect("store");
 
         let mut broken = tw_list();
         broken.content_type = "text/plain".into();
@@ -1293,7 +1347,7 @@ mod tests {
 
         // 國際服 patch host 尚未確認（protocols §5.1），清單一律拒絕。
         assert!(matches!(
-            store_patch_list(&pending, Region::Global, install, &tw_list()),
+            store_patch_list(&pending, Region::Global, install, tw_list()),
             Err(AppError::PatchListRejected { region: Region::Global, .. })
         ));
         assert!(pending.get(Region::Global).is_none());
@@ -1304,7 +1358,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().join("appdata"));
         let pending = PendingUpdates::default();
-        store_patch_list(&pending, Region::Tw, dir.path(), &tw_list()).expect("store");
+        store_patch_list(&pending, Region::Tw, dir.path(), tw_list()).expect("store");
 
         let json = serde_json::to_value(patch_state(&paths, &pending).expect("state")).expect("json");
         let tw = &json["tw"];
@@ -1318,7 +1372,7 @@ mod tests {
         for secret_field in ["uid", "uniqueid", "sid", "session"] {
             assert!(!text.contains(secret_field), "{secret_field}");
         }
-        // pending 本身也只有清單與安裝路徑（RawPatchList 的 Debug 不印 body）。
+        // RawPatchList 的 Debug 不印 body。
         let raw = format!("{:?}", tw_list());
         assert!(!raw.contains("patch-dl"), "{raw}");
     }
@@ -1552,6 +1606,63 @@ mod tests {
         assert!(!err.to_string().contains("修復"), "{err}");
     }
 
+    fn store_ex1_patch(fx: &TwInstall, raw: RawPatchList, stub: &Stub) -> PendingUpdates {
+        let pending = PendingUpdates::default();
+        store_patch_list(&pending, Region::Tw, &fx.install, raw).expect("store");
+        let mut update = pending.get(Region::Tw).expect("pending");
+        update.patches = vec![real_ex1_entry(stub)];
+        pending.set(Region::Tw, Some(update));
+        pending
+    }
+
+    async fn assert_stale_list_rejected(fx: &TwInstall, pending: &PendingUpdates, stub: &Stub) {
+        let before = fx.snapshot();
+        let result = run_update(fx, pending, &|_| {}).await;
+        assert!(
+            matches!(&result, Err(AppError::NotFound { what }) if what.contains("請先檢查更新")),
+            "舊清單應被拒絕，實際：{result:?}"
+        );
+        assert_clean_abort(fx, &before, &result.unwrap_err());
+        assert!(pending.get(Region::Tw).is_none());
+        assert!(stub.requests().is_empty(), "下載前就拒絕");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_requested_before_external_update_is_not_applied() {
+        let _processes = GAME_PROCESSES.read().await;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fx = TwInstall::create(dir.path());
+        let stub = serve_files(vec![(EX1_URL_PATH, TW_EX1_PATCH.to_vec())]);
+        let raw = tw_list();
+        fs::write(fx.path(GAME_VER), EX1_VERSION).expect("external update");
+        let pending = store_ex1_patch(&fx, raw, &stub);
+        assert_stale_list_rejected(&fx, &pending, &stub).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn expansion_only_advance_invalidates_stale_list() {
+        let _processes = GAME_PROCESSES.read().await;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fx = TwInstall::create(dir.path());
+        let stub = serve_files(vec![(EX1_URL_PATH, TW_EX1_PATCH.to_vec())]);
+        let pending = store_ex1_patch(&fx, tw_list(), &stub);
+        fs::write(fx.path(EX1_VER), EX1_VERSION).expect("external ex1 update");
+        assert_stale_list_rejected(&fx, &pending, &stub).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn missing_expansion_appearing_invalidates_stale_list() {
+        let _processes = GAME_PROCESSES.read().await;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fx = TwInstall::create(dir.path());
+        let stub = serve_files(vec![(EX1_URL_PATH, TW_EX1_PATCH.to_vec())]);
+        let pending = store_ex1_patch(&fx, tw_list(), &stub);
+        let ex2 = fx.path(r"game\sqpack\ex2");
+        fs::create_dir(&ex2).expect("mkdir ex2");
+        fs::write(ex2.join("ex2.ver"), EX1_VERSION).expect("install ex2");
+        assert_stale_list_rejected(&fx, &pending, &stub).await;
+    }
+
     /// 收集 update_game 的進度事件（進度回呼的型別要求 `'static`，以 `Arc` 共用）。
     #[derive(Clone, Default)]
     struct Recorder(Arc<Mutex<Vec<GameUpdateProgress>>>);
@@ -1727,15 +1838,17 @@ mod tests {
     }
 
     /// 驗收「逐 patch 推進版本」與「已開始套用後失敗才提示官方修復並保留標記」：ex1 實際 patch 成功；game
-    /// 08.17（格式正確的空 patch）套用後寫 `ffxivgame.ver` 失敗（位置被非空目錄佔住）；ex2 08.24 未開始。
+    /// 08.17（格式正確的空 patch）套用後寫 `ffxivgame.ver` 失敗（可以讀、不能取代）；ex2 08.24 未開始。
     #[tokio::test(flavor = "multi_thread")]
     async fn tw_later_patch_failing_after_write_keeps_earlier_version_and_dirty() {
         let _processes = GAME_PROCESSES.read().await;
         let dir = tempfile::tempdir().expect("tempdir");
         let fx = TwInstall::create(dir.path());
-        fs::remove_file(fx.path(GAME_VER)).expect("rm ver");
-        fs::create_dir(fx.path(GAME_VER)).expect("mkdir");
-        fs::write(fx.path(GAME_VER).join("keep"), b"").expect("seed");
+        let _locked_version = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ.0)
+            .open(fx.path(GAME_VER))
+            .expect("allow reads but prevent replacing ffxivgame.ver");
         fs::create_dir_all(fx.path(r"game\sqpack\ex2")).expect("mkdir ex2");
         let empty = empty_zipatch();
         let ex2_path = "/game/ex2/00000000/D2026.08.24.0000.0000.patch";
@@ -1858,10 +1971,10 @@ mod tests {
             let fx = TwInstall::create(dir.path());
             let before = fx.snapshot();
             let pending = PendingUpdates::default();
-            store_patch_list(&pending, Region::Tw, &fx.install, &tw_list()).expect("store");
+            store_patch_list(&pending, Region::Tw, &fx.install, tw_list()).expect("store");
             let raw = RawPatchList {
-                content_type: TW_CONTENT_TYPE.trim().into(),
                 body: body.into_bytes(),
+                ..tw_list()
             };
 
             let err = require_up_to_date(&pending, Region::Tw, &fx.install, VersionCheck::<()>::PatchList(raw))
