@@ -46,6 +46,10 @@ export function resetActTabRegion(): void {
   actTabRegion = null;
 }
 
+export function setActTabRegion(region: Region): void {
+  actTabRegion = region;
+}
+
 const ACT_STATUS_TEXT: Record<ActStatus, string> = {
   notConfigured: "尚未選擇 ACT",
   missing: "找不到設定的執行檔",
@@ -432,7 +436,7 @@ export function renderAct(): void {
       return [regionLabel(r), mark];
     },
     select: (r) => {
-      actTabRegion = r;
+      setActTabRegion(r);
       renderAct();
       document.getElementById(`act-tab-${r}`)?.focus();
     },

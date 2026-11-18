@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-extension-update-reminders"
+description = "Enables the set_extension_update_reminders command without any pre-configured scope."
+commands.allow = ["set_extension_update_reminders"]
+
+[[permission]]
+identifier = "deny-set-extension-update-reminders"
+description = "Denies the set_extension_update_reminders command without any pre-configured scope."
+commands.deny = ["set_extension_update_reminders"]

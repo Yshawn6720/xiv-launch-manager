@@ -9,6 +9,7 @@ use reqwest::header::ACCEPT;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
+use crate::act;
 use crate::act_bridge::{self, Env, FfxivPlugin};
 use crate::dalamud;
 use crate::error::{AppError, AppResult};
@@ -97,6 +98,31 @@ pub fn versions(config: &ActConfig, env: &Env, latest: Option<Version>) -> Plugi
         global,
         tw,
         latest: latest.map(|v| v.to_string()),
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct ActUpdate {
+    region: Region,
+    latest: String,
+    shared: bool,
+}
+
+pub(crate) fn update_reminders(config: &ActConfig, versions: PluginVersions) -> [Option<ActUpdate>; 2] {
+    let Some(latest) = versions.latest else {
+        return [None, None];
+    };
+    let shared = config.global.path.as_deref().zip(config.tw.path.as_deref())
+        .is_some_and(|(global, tw)| act::same_location(global, tw));
+    let outdated = |status| matches!(status, PluginStatus::Installed { outdated: true, .. });
+    match (outdated(versions.global), !shared && outdated(versions.tw)) {
+        (true, true) => [
+            Some(ActUpdate { region: Region::Global, latest: latest.clone(), shared: false }),
+            Some(ActUpdate { region: Region::Tw, latest, shared: false }),
+        ],
+        (true, false) => [Some(ActUpdate { region: Region::Global, latest, shared }), None],
+        (false, true) => [Some(ActUpdate { region: Region::Tw, latest, shared: false }), None],
+        (false, false) => [None, None],
     }
 }
 

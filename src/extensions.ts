@@ -1,6 +1,8 @@
-import { renderAct } from "./act";
+import { renderAct, setActTabRegion } from "./act";
+import type { Region } from "./api";
 import { h, section } from "./app";
-import { renderDalamud } from "./dalamud";
+import { renderDalamud, setDalamudTabRegion } from "./dalamud";
+import { showTab } from "./main";
 import { showSafety } from "./settings";
 import { subtabs } from "./widgets";
 
@@ -20,6 +22,14 @@ export const extPanels: Record<ExtTab, HTMLElement> = {
   dalamud: h("div", { id: "ext-panel-dalamud", role: "tabpanel", "aria-labelledby": "ext-tab-dalamud" }),
   act: h("div", { id: "ext-panel-act", role: "tabpanel", "aria-labelledby": "ext-tab-act" }),
 };
+
+export async function showExtension(tab: ExtTab, region: Region): Promise<void> {
+  extTab = tab;
+  if (tab === "act") setActTabRegion(region);
+  else setDalamudTabRegion(region);
+  await showTab("extensions");
+  document.getElementById(`${tab}-tab-${region}`)?.focus();
+}
 
 export function renderExtensions(): void {
   for (const t of EXT_TABS) extPanels[t].hidden = t !== extTab;

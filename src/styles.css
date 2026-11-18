@@ -1258,9 +1258,38 @@ button.news-retry:hover:not(:disabled) {
 }
 
 .login-panel,
+.extension-update-group,
 .news-group {
   max-width: var(--content-w);
   margin-inline: auto;
+}
+
+.extension-update-group {
+  margin-top: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--card);
+}
+
+.extension-update-group ul {
+  display: grid;
+  gap: var(--space-1);
+  margin: var(--space-1) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.extension-update-group li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 var(--space-2);
+}
+
+.extension-update-group button {
+  text-align: start;
+  overflow-wrap: anywhere;
 }
 
 .login-panel {
@@ -2699,6 +2728,15 @@ dialog .actions {
   justify-content: flex-end;
   gap: var(--space-2);
   margin-top: var(--space-4);
+}
+
+.tw-dalamud-confirmation {
+  min-width: 0;
+  max-width: min(32rem, calc(100vw - 2 * var(--space-4)));
+}
+
+.tw-dalamud-confirmation .actions {
+  flex-wrap: wrap;
 }
 
 /* 示範影片：16:9，寬度隨視窗縮，不超過影片原寸 1280px。 */

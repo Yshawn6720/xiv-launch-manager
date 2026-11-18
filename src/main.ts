@@ -14,6 +14,7 @@ import { backgroundUpdateCheck, paintAppUpdate, UPDATE_CHECK_TICK_MS, versionBut
 import { renderCharacters, setCharacters } from "./characters";
 import { installing, installProgress } from "./dalamud";
 import { renderExtensions } from "./extensions";
+import { refreshExtensionUpdates, setExtensionUpdateActSettings } from "./extension-updates";
 import { autoCheckTwGameUpdate, setPatchState } from "./game-update";
 import {
   focusLoginStart,
@@ -90,7 +91,9 @@ export async function render(): Promise<void> {
   applyTheme(config.ui.theme);
   setDetected(await detecting);
   setPatchState(await patching);
-  setActData(await acting, await linking, await choosing);
+  const act = await acting;
+  setActData(act, await linking, await choosing);
+  setExtensionUpdateActSettings(act);
   renderLogin();
   renderExtensions();
   renderSettings();
@@ -100,6 +103,7 @@ export async function render(): Promise<void> {
   }
   paintAppUpdate();
   if (currentTab === "login") refreshServerStatus();
+  refreshExtensionUpdates();
   // 帳號名稱可能改了，先用上次的結果重畫；每個動作（含登入啟動、開啟 ACT）結束後 run() 都會重繪，這裡順便重查。
   paintRunningStatus();
   refreshRunningStatus();
@@ -173,3 +177,5 @@ void getVersion().then(
 backgroundUpdateCheck();
 window.setInterval(backgroundUpdateCheck, UPDATE_CHECK_TICK_MS);
 window.addEventListener("focus", backgroundUpdateCheck);
+window.setInterval(refreshExtensionUpdates, UPDATE_CHECK_TICK_MS);
+window.addEventListener("focus", refreshExtensionUpdates);

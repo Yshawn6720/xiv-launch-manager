@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use crate::error::{AppError, AppResult};
+use crate::region::Region;
 use crate::store::{AppPaths, DalamudChannel, Profile, YanmucorpVersion};
 
 pub use detect::{DetectedDalamudData, detect_from_env};
@@ -316,6 +317,76 @@ fn numeric_segments(version: &str) -> Option<Vec<u64>> {
     version.split('.').map(|s| s.parse().ok()).collect()
 }
 
+/// 首頁只查版本資訊：不準備 runtime、下載、驗證或修改安裝目錄。
+pub(crate) async fn available_updates(
+    paths: &AppPaths,
+    profiles: &[Profile],
+) -> AppResult<[(Region, Option<String>); 2]> {
+    let installed = list_installed(paths)?;
+    let global = DalamudChannel::Goatcorp;
+    let tw = DalamudChannel::Yanmucorp { version: YanmucorpVersion::Latest };
+    let global_version = installed_version(&global, &installed);
+    let tw_version = if profiles.iter().any(|profile| profile.channel == tw) {
+        installed_version(&tw, &installed)
+    } else {
+        None
+    };
+    if global_version.is_none() && tw_version.is_none() {
+        return Ok([(Region::Global, None), (Region::Tw, None)]);
+    }
+    let client = http_client()?;
+    let (global_update, tw_update) = tokio::join!(
+        available_update(&client, &global, global_version),
+        available_update(&client, &tw, tw_version),
+    );
+    Ok([(Region::Global, global_update), (Region::Tw, tw_update)])
+}
+
+async fn available_update(
+    client: &reqwest::Client,
+    channel: &DalamudChannel,
+    installed: Option<&InstalledVersion>,
+) -> Option<String> {
+    let current = &installed?.version;
+    // 下載用的 client 沒有總逾時；首頁查的是小型 metadata，不必跟下載等同樣久。
+    let result = tokio::time::timeout(Duration::from_secs(15), async {
+        match channel {
+            DalamudChannel::Goatcorp => goatcorp::fetch_version_info(client).await.map(|info| info.assembly_version),
+            DalamudChannel::Yanmucorp { version } => yanmucorp::resolve_tag(client, version).await,
+        }
+    })
+    .await;
+    match result {
+        Ok(Ok(latest)) => is_newer(channel, current, &latest).then_some(latest),
+        Ok(Err(e)) => {
+            eprintln!("{} Dalamud 更新提醒查詢失敗：{e}", channel.region());
+            None
+        }
+        Err(e) => {
+            eprintln!("{} Dalamud 更新提醒查詢逾時：{e}", channel.region());
+            None
+        }
+    }
+}
+
+fn is_newer(channel: &DalamudChannel, current: &str, latest: &str) -> bool {
+    match channel {
+        DalamudChannel::Goatcorp => numeric_segments(current)
+            .zip(numeric_segments(latest))
+            .is_some_and(|(current, latest)| latest > current),
+        DalamudChannel::Yanmucorp { version: YanmucorpVersion::Latest } => {
+            dated_tag(current) && dated_tag(latest) && latest > current
+        }
+        DalamudChannel::Yanmucorp { version: YanmucorpVersion::Pinned { .. } } => false,
+    }
+}
+
+fn dated_tag(tag: &str) -> bool {
+    tag.len() == 11 && tag.bytes().enumerate().all(|(i, b)| {
+        if matches!(i, 2 | 5 | 8) { b == b'-' } else { b.is_ascii_digit() }
+    })
+}
+
 /// 刪除一個已安裝版本。先整個移開：被遊戲佔用時 rename 失敗並回錯誤，正式目錄保持完整。
 pub fn remove_installed(paths: &AppPaths, source: &str, version: &str) -> AppResult<()> {
     let target = paths.dalamud_dir(source, version);
@@ -397,6 +468,21 @@ mod tests {
             None
         );
         assert_eq!(found_version(&DalamudChannel::Goatcorp, &[]), None);
+    }
+
+    #[test]
+    fn update_reminders_compare_numeric_versions_and_ignore_pinned_tags() {
+        let global = DalamudChannel::Goatcorp;
+        assert!(is_newer(&global, "15.0.9.0", "15.0.10.0"));
+        assert!(!is_newer(&global, "15.0.10.0", "15.0.9.0"));
+        assert!(!is_newer(&global, "15.0.9.0", "unknown"));
+
+        let tw = yanmucorp(YanmucorpVersion::Latest);
+        assert!(is_newer(&tw, "26-10-03-01", "26-10-03-02"));
+        assert!(!is_newer(&tw, "26-10-03-02", "26-10-03-02"));
+        assert!(!is_newer(&tw, "26-10-03-02", "nightly-123"));
+        let pinned = yanmucorp(YanmucorpVersion::Pinned { tag: "26-10-03-01".into() });
+        assert!(!is_newer(&pinned, "26-10-03-01", "26-10-03-02"));
     }
 
     #[test]

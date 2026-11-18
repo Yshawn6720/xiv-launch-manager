@@ -99,7 +99,12 @@ export type AfterLaunch = "keep" | "minimize" | "tray";
 export interface UiSettings {
   theme: Theme;
   afterLaunch: AfterLaunch;
+  extensionUpdateReminders: boolean;
 }
+
+export type ExtensionUpdate =
+  | { kind: "act"; region: Region; latest: string; shared: boolean }
+  | { kind: "dalamud"; region: Region; latest: string };
 
 export type ServerState = "open" | "maintenance" | "unknown";
 
@@ -490,6 +495,8 @@ export const api = {
   setTheme: (theme: Theme) => invoke<void>("set_theme", { theme }),
   /** 儲存「遊戲啟動後」；下次本程式成功啟動遊戲時生效。 */
   setAfterLaunch: (afterLaunch: AfterLaunch) => invoke<void>("set_after_launch", { afterLaunch }),
+  setExtensionUpdateReminders: (enabled: boolean) => invoke<void>("set_extension_update_reminders", { enabled }),
+  getExtensionUpdates: () => invoke<ExtensionUpdate[]>("get_extension_updates"),
   /**
    * 儲存國際服外部包。只在 enabled 時檢查資料夾（不合格回給使用者看的原因）；還沒確認過風險時，開啟要帶
    * acceptRisk=true，否則後端拒絕。確認只記一次。

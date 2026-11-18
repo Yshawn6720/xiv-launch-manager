@@ -1,5 +1,6 @@
 import { api, regionLabel, type AfterLaunch, type LicenseDoc, type Theme } from "./api";
 import { applyTheme, config, errorText, h, openFolder, REGIONS, run, say, section } from "./app";
+import { refreshExtensionUpdates } from "./extension-updates";
 import { render, showTab } from "./main";
 
 // ---------- 免責與安全 ----------
@@ -226,8 +227,21 @@ function choiceRow<T extends string>(
   );
 }
 
-/** 「介面」：主題（立即套用）與遊戲啟動後的視窗行為（下次成功啟動遊戲時生效）。 */
+/** 「介面」：主題、遊戲啟動後的視窗行為與首頁提醒。 */
 function uiBlock(): HTMLElement {
+  const reminders = h("input", { type: "checkbox", "aria-describedby": "extension-updates-hint" });
+  reminders.checked = config.ui.extensionUpdateReminders;
+  reminders.addEventListener("change", () => {
+    const enabled = reminders.checked;
+    saveUi(
+      enabled ? "已開啟擴充功能更新提醒" : "已關閉擴充功能更新提醒",
+      () => api.setExtensionUpdateReminders(enabled),
+      () => {
+        config.ui.extensionUpdateReminders = enabled;
+        refreshExtensionUpdates();
+      },
+    );
+  });
   return h(
     "section",
     { class: "settings-block" },
@@ -251,6 +265,16 @@ function uiBlock(): HTMLElement {
         "p",
         { class: "field-hint" },
         "只在本程式成功開出遊戲後動作；本程式開的遊戲全部關閉後，視窗自動還原。縮到系統匣時，左鍵點圖示叫回視窗，右鍵選單可結束程式。",
+      ),
+    ),
+    h(
+      "div",
+      { class: "setting-row" },
+      h(
+        "div",
+        { class: "card-main" },
+        h("label", { class: "check" }, reminders, "顯示擴充功能更新提醒"),
+        h("p", { class: "field-hint", id: "extension-updates-hint" }, "只在登入頁提醒 ACT 的 FFXIV 插件和 Dalamud，不影響下載或啟動器更新。"),
       ),
     ),
   );

@@ -9,6 +9,7 @@
     "allow-set-game-path",
     "allow-set-theme",
     "allow-set-after-launch",
+    "allow-set-extension-update-reminders",
     "allow-set-external-pack",
     "allow-detect-game-path",
     "allow-detect-dalamud-data",
@@ -54,6 +55,7 @@
     "allow-launch-act",
     "allow-get-act-link-status",
     "allow-get-act-plugin-versions",
+    "allow-get-extension-updates",
     "allow-enable-act-link",
     "allow-create-dual-act",
     "updater:allow-check"

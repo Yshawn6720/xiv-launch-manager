@@ -517,6 +517,12 @@ export function resetDalamudTabRegion(): void {
   tabRegion = null;
 }
 
+/** 從首頁提醒開啟該服；繁中服直接顯示「最新版」的更新入口。 */
+export function setDalamudTabRegion(region: Region): void {
+  tabRegion = region;
+  if (region === "tw") twInstallChoice = "";
+}
+
 function currentTabRegion(): Region {
   return tabRegion ?? draft?.region ?? "global";
 }

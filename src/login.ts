@@ -47,6 +47,7 @@ import {
   twTagLabel,
   twVersionSelect,
 } from "./dalamud";
+import { extensionUpdateGroup } from "./extension-updates";
 import {
   autoCheckTwGameUpdate,
   clearReloginPending,
@@ -61,6 +62,7 @@ import { newsGroup, paintNews } from "./news";
 import { paintProgress, progressState, type ProgressState, progressView, type ProgressView } from "./progress";
 import { noteLaunch } from "./running-status";
 import { canContinueAfterDalamudPrepareError, clearEarlyExits, takeEarlyExit } from "./running-sync";
+import { confirmTwDalamud, TW_DALAMUD_UNCONFIRMED_PREFIX } from "./tw-dalamud-confirmation";
 import { moreMenu } from "./widgets";
 
 // ---------- 登入 ----------
@@ -491,7 +493,9 @@ function accountPane(selected: AccountView | null): HTMLElement {
 }
 
 function mountLogin(a: AccountView | null, form: HTMLFormElement): void {
-  section("login").replaceChildren(h("div", { class: "login-layout" }, accountPane(a), h("div", { class: "login-main" }, form, newsGroup())));
+  section("login").replaceChildren(
+    h("div", { class: "login-layout" }, accountPane(a), h("div", { class: "login-main" }, form, extensionUpdateGroup, newsGroup())),
+  );
   paintServerStatus();
 }
 
@@ -1231,7 +1235,8 @@ function startSignIn(
           )) return cancelled();
           await api.saveProfile({ ...profile, shareConfirmed: true });
         }
-        if (profile) {
+        // 台服後端先查遊戲更新，再準備 Dalamud，且兩步都在登入認證前。
+        if (profile && region === "global") {
           try {
             await api.installDalamud(channelRegion(profile.channel), channelVersion(profile.channel), versionCheck);
           } catch (e) {
@@ -1253,7 +1258,22 @@ function startSignIn(
         release();
       }, { once: true });
       clearEarlyExits();
-      const r = await api.launchAccount(id, code, password, mode === "off", plugins, versionCheck);
+      const launchAccount = async () => {
+        try {
+          return await api.launchAccount(id, code, password, mode === "off", plugins, versionCheck);
+        } catch (e) {
+          const raw = errorText(e);
+          if (region !== "tw" || mode === "off" || versionCheck !== "enforce" ||
+              !raw.startsWith(TW_DALAMUD_UNCONFIRMED_PREFIX)) throw e;
+          if (attempt.detached) return null;
+          const choice = await confirmTwDalamud(raw.slice(TW_DALAMUD_UNCONFIRMED_PREFIX.length));
+          if (choice === "cancel") return null;
+          paintStage("正在登入遊戲…");
+          return api.launchAccount(id, code, password, choice === "plain", plugins, choice === "load" ? "skip" : "enforce");
+        }
+      };
+      const r = await launchAccount();
+      if (r === null) return cancelled();
       const loaded = r.dalamudVersion
         ? `・${dalamudVersionLabel(region, r.dalamudVersion, await installedDalamudVersion(region, r.dalamudVersion))}`
         : "";

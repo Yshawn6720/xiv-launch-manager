@@ -83,14 +83,23 @@ impl CharacterNames {
     }
 }
 
-/// 設定分頁「介面」的兩個選項。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+/// 設定分頁「介面」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct UiSettings {
-    #[serde(default)]
     pub theme: Theme,
-    #[serde(default)]
     pub after_launch: AfterLaunch,
+    pub extension_update_reminders: bool,
+}
+
+impl Default for UiSettings {
+    fn default() -> Self {
+        Self {
+            theme: Theme::default(),
+            after_launch: AfterLaunch::default(),
+            extension_update_reminders: true,
+        }
+    }
 }
 
 /// 介面主題：深色（預設）、淺色或跟隨系統。設定檔沒有這一欄（新安裝、2026-10-14 前的設定檔）時是深色；已寫入的值照用，
@@ -566,11 +575,15 @@ mod tests {
         let config = load_config(&paths).expect("legacy config");
         assert_eq!(config.ui.theme, Theme::Dark);
         assert_eq!(config.ui.after_launch, AfterLaunch::Keep);
+        assert!(config.ui.extension_update_reminders);
 
         save_config(&paths, &config).expect("save");
         let saved: serde_json::Value =
             serde_json::from_slice(&fs::read(paths.config_file()).expect("read")).expect("json");
-        assert_eq!(saved["ui"], serde_json::json!({ "theme": "dark", "afterLaunch": "keep" }));
+        assert_eq!(
+            saved["ui"],
+            serde_json::json!({ "theme": "dark", "afterLaunch": "keep", "extensionUpdateReminders": true })
+        );
     }
 
     #[test]
@@ -578,11 +591,26 @@ mod tests {
         // 已寫入的主題照用（含跟隨系統、淺色），只有缺欄位時才是預設的深色。
         for (stored, theme) in [("system", Theme::System), ("light", Theme::Light), ("dark", Theme::Dark)] {
             let ui: UiSettings = serde_json::from_value(serde_json::json!({ "theme": stored })).expect("theme only");
-            assert_eq!(ui, UiSettings { theme, after_launch: AfterLaunch::Keep }, "{stored}");
+            assert_eq!(ui, UiSettings { theme, ..UiSettings::default() }, "{stored}");
         }
         let ui: UiSettings =
             serde_json::from_value(serde_json::json!({ "afterLaunch": "tray" })).expect("after launch only");
-        assert_eq!(ui, UiSettings { theme: Theme::Dark, after_launch: AfterLaunch::Tray });
+        assert_eq!(ui, UiSettings { after_launch: AfterLaunch::Tray, ..UiSettings::default() });
+    }
+
+    #[test]
+    fn disabled_extension_update_reminders_survive_save_and_reload() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        let config = serde_json::json!({
+            "ui": { "theme": "light", "afterLaunch": "tray", "extensionUpdateReminders": false }
+        });
+        fs::write(paths.config_file(), config.to_string()).expect("write existing settings");
+        let config = load_config(&paths).expect("load");
+        save_config(&paths, &config).expect("save");
+        let ui = load_config(&paths).expect("reload").ui;
+        assert!(!ui.extension_update_reminders);
+        assert_eq!((ui.theme, ui.after_launch), (Theme::Light, AfterLaunch::Tray));
     }
 
     #[test]

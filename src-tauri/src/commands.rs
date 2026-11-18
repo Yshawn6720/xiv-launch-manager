@@ -176,6 +176,15 @@ pub async fn set_after_launch(state: State<'_, AppState>, after_launch: AfterLau
     .await
 }
 
+#[tauri::command]
+pub async fn set_extension_update_reminders(state: State<'_, AppState>, enabled: bool) -> AppResult<()> {
+    update_config(&state, |c| {
+        c.ui.extension_update_reminders = enabled;
+        Ok(())
+    })
+    .await
+}
+
 /// 設定 › 國際服外部包（protocols §1.6）：只在開啟時檢查資料夾（關閉時資料夾被移走也能關）；設定的檢查見
 /// `global::shadow::apply_settings`。
 #[tauri::command]
@@ -836,8 +845,8 @@ fn install_channel(region: Region, version: Option<YanmucorpVersion>) -> AppResu
 }
 
 /// 下載並安裝某區服的衛月（不啟動遊戲）；安裝目錄依版本共用，與設定檔無關。回傳安裝好的版本。
-/// `version_check` 為 `Skip` 時不比對遊戲版本：登入前準備時使用者本次選了「強制載入」，或設定頁下載繁中服
-/// （protocols §1.5、§2.5「版本比對」）。
+/// `version_check` 為 `Skip` 時不比對遊戲版本：國際服登入前準備選了「強制載入」，或擴充功能頁下載繁中服
+/// （台服登入本身由 `launch_account` 準備；protocols §1.5、§2.5「版本比對」）。
 #[tauri::command]
 pub async fn install_dalamud(
     app: AppHandle,
@@ -1120,8 +1129,57 @@ pub async fn get_act_link_status(state: State<'_, AppState>) -> AppResult<LinkSt
 #[tauri::command]
 pub async fn get_act_plugin_versions(state: State<'_, AppState>, force: bool) -> AppResult<PluginVersions> {
     let config = load_act_settings(&state).await?;
+    act_plugin_versions(&state, &config, force).await
+}
+
+async fn act_plugin_versions(state: &AppState, config: &ActConfig, force: bool) -> AppResult<PluginVersions> {
+    let env = act_bridge::Env::from_env()?;
     let latest = state.act_plugin_latest.get(force, act_plugin::fetch_latest).await;
-    Ok(act_plugin::versions(&config, &act_bridge::Env::from_env()?, latest))
+    Ok(act_plugin::versions(config, &env, latest))
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ExtensionUpdate {
+    Act(act_plugin::ActUpdate),
+    Dalamud { region: Region, latest: String },
+}
+
+/// 首頁的唯讀提醒。不持設定鎖連網，也不碰登入／下載鎖；各來源錯誤不擋其他來源。
+#[tauri::command]
+pub async fn get_extension_updates(state: State<'_, AppState>) -> AppResult<Vec<ExtensionUpdate>> {
+    let config = {
+        let _guard = state.config_lock.lock().await;
+        store::load_config(&state.paths)?
+    };
+    if !config.ui.extension_update_reminders {
+        return Ok(Vec::new());
+    }
+    let (act, dalamud) = tokio::join!(
+        act_update_reminders(&state, &config.act),
+        dalamud::available_updates(&state.paths, &config.profiles),
+    );
+    let mut updates: Vec<_> = act.into_iter().flatten().map(ExtensionUpdate::Act).collect();
+    match dalamud {
+        Ok(versions) => updates.extend(versions.into_iter().filter_map(|(region, latest)| {
+            latest.map(|latest| ExtensionUpdate::Dalamud { region, latest })
+        })),
+        Err(e) => eprintln!("無法查詢 Dalamud 更新提醒：{e}"),
+    }
+    Ok(updates)
+}
+
+async fn act_update_reminders(state: &AppState, config: &ActConfig) -> [Option<act_plugin::ActUpdate>; 2] {
+    if config.global.path.is_none() && config.tw.path.is_none() {
+        return [None, None];
+    }
+    match act_plugin_versions(state, config, false).await {
+        Ok(versions) => act_plugin::update_reminders(config, versions),
+        Err(e) => {
+            eprintln!("無法查詢 ACT 更新提醒：{e}");
+            [None, None]
+        }
+    }
 }
 
 /// 「啟用 ACT 連動」（protocols §6.4）：把外掛登記到每個已設定 ACT 的設定檔；有 ACT 在執行就拒絕。
